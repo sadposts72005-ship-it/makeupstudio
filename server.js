@@ -18,8 +18,18 @@ const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_change_in_pro
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '661574967799-jrv9c3s98t3u5g19nrdcatd80qrmovib.apps.googleusercontent.com';
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
-// Middleware
-app.use(cors()); 
+// ================= 🌐 إعدادات الـ CORS الكاملة =================
+const corsOptions = {
+    origin: '*', // السماح لجميع المصادر بربط الطلبات
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+    credentials: true,
+    optionsSuccessStatus: 200
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // التعامل مع طلبات Preflight فوراً
+
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
@@ -195,6 +205,11 @@ const safeDeleteImage = (imageUrl) => {
 };
 
 // ================= الـ API Routes =================
+
+// مسار الاختبار الرئيسي
+app.get('/', (req, res) => {
+    res.json({ message: "Makeup Studio API is running smoothly 🚀" });
+});
 
 // ---------------- 🔴 روابط التسجيل ودخول جوجل ----------------
 
@@ -381,7 +396,6 @@ app.get('/api/users/:id', async (req, res) => {
     }
 });
 
-// 🟢 [تم التعديل والتصحيح هنا لحل مشكلة "معرف المستخدم غير صالح"]
 app.put('/api/users/update-profile', async (req, res) => {
     try {
         const { userId, name, email } = req.body;
@@ -392,7 +406,6 @@ app.put('/api/users/update-profile', async (req, res) => {
 
         const trimmedName = name.trim();
 
-        // معالجة الحالات التي يكون فيها userId غير تابع لـ MongoDB (مثل حساب الأدمن والتطوير)
         if (!mongoose.Types.ObjectId.isValid(userId)) {
             if (email) {
                 const updatedUserByEmail = await User.findOneAndUpdate(
@@ -419,7 +432,6 @@ app.put('/api/users/update-profile', async (req, res) => {
             });
         }
 
-        // التحديث الطبيعي لـ MongoDB ObjectId
         const updatedUser = await User.findByIdAndUpdate(
             userId,
             { name: trimmedName },
