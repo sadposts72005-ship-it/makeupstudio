@@ -28,7 +28,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // التعامل مع طلبات Preflight فوراً
+app.options(/(.*)/, cors(corsOptions)); // التعامل مع طلبات Preflight فوراً
 
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
