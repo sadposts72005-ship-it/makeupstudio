@@ -31,18 +31,22 @@ app.use(cors(corsOptions));
 app.options(/(.*)/, cors(corsOptions)); // التعامل مع طلبات Preflight فوراً
 
 app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// تأكيد وجود مجلد الرفع
-const uploadsDir = path.join(__dirname, 'uploads');
+// ================= 📁 إعداد مجلد الرفع ليناسب البيئة المحلية و Vercel =================
+// Vercel Serverless يدعم التخزين المؤقت فقط في مجلد /tmp
+const uploadsDir = process.env.VERCEL ? '/tmp' : path.join(__dirname, 'uploads');
+
 if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
+// عرض الصور من مجلد الرفع
+app.use('/uploads', express.static(uploadsDir));
+
 // ================= إعداد Multer لرفع الصور =================
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-        cb(null, 'uploads/'); 
+        cb(null, uploadsDir); 
     },
     filename: (req, file, cb) => {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -194,7 +198,7 @@ const safeDeleteImage = (imageUrl) => {
         const filename = imageUrl.split('/uploads/')[1];
         if (filename) {
             const safeFileName = path.basename(filename);
-            const filePath = path.join(__dirname, 'uploads', safeFileName);
+            const filePath = path.join(uploadsDir, safeFileName);
             if (fs.existsSync(filePath)) {
                 fs.unlinkSync(filePath);
             }
@@ -454,11 +458,12 @@ app.put('/api/users/update-profile', async (req, res) => {
 
 // ---------------- 🟢 روابط الأقسام والمنتجات والصور ----------------
 
+// 🟢 تعديل الـ Upload لإرجاع مسار نسبي آمن يعمل على الويب والـ App
 app.post('/api/upload', upload.single('image'), (req, res) => {
     if (!req.file) return res.status(400).json({ message: 'لم يتم رفع أي ملف' });
-    const protocol = req.protocol;
-    const host = req.get('host'); 
-    const imageUrl = `${protocol}://${host}/uploads/${req.file.filename}`;
+    
+    // إرجاع المسار النسبي فقط دون إضافة localhost أو الهوست
+    const imageUrl = `/uploads/${req.file.filename}`;
     res.json({ imageUrl });
 });
 
