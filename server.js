@@ -458,7 +458,6 @@ app.put('/api/users/update-profile', async (req, res) => {
 
 // ---------------- 🟢 روابط الأقسام والمنتجات والصور ----------------
 
-// 🟢 تعديل الـ Upload لإرجاع مسار نسبي آمن يعمل على الويب والـ App
 app.post('/api/upload', upload.single('image'), (req, res) => {
     if (!req.file) return res.status(400).json({ message: 'لم يتم رفع أي ملف' });
     
