@@ -4,11 +4,14 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const multer = require('multer');
 const path = require('path');
-const fs = require('fs');
 const https = require('https');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
+
+// مكتبات Cloudinary لتخزين الصور بشكل دائم
+const cloudinary = require('cloudinary').v2;
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -20,7 +23,7 @@ const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // ================= 🌐 إعدادات الـ CORS الكاملة =================
 const corsOptions = {
-    origin: '*', // السماح لجميع المصادر بربط الطلبات
+    origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
     credentials: true,
@@ -28,32 +31,28 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options(/(.*)/, cors(corsOptions)); // التعامل مع طلبات Preflight فوراً
-
+app.options(/(.*)/, cors(corsOptions)); 
 app.use(express.json());
 
-// ================= 📁 إعداد مجلد الرفع ليناسب البيئة المحلية و Vercel =================
-// Vercel Serverless يدعم التخزين المؤقت فقط في مجلد /tmp
-const uploadsDir = process.env.VERCEL ? '/tmp' : path.join(__dirname, 'uploads');
-
-if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-// عرض الصور من مجلد الرفع
-app.use('/uploads', express.static(uploadsDir));
-
-// ================= إعداد Multer لرفع الصور =================
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, uploadsDir); 
-    },
-    filename: (req, file, cb) => {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, uniqueSuffix + path.extname(file.originalname));
-    }
+// ================= ☁️ إعداد Cloudinary لرفع الصور بشكل دائم =================
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
 });
-const upload = multer({ storage: storage });
+
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'makeup_studio_uploads',
+    allowed_formats: ['jpg', 'png', 'jpeg', 'webp'],
+  },
+});
+
+const upload = multer({ 
+    storage: storage,
+    limits: { fileSize: 5 * 1024 * 1024 } // حد أقصى 5 ميجابايت للصورة
+});
 
 // ================= الاتصال بقاعدة البيانات MongoDB Atlas =================
 mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/makeup_store')
@@ -86,7 +85,7 @@ const clothingSchema = new mongoose.Schema({
     description: { type: String },
 
     category: { type: String, required: true, trim: true, index: true },
-    subcategory: { type: String, trim: true, default: null },
+    subcategory: { type: String, trim: true, default: null, index: true },
 
     variantGroups: [{
         title: { type: String },
@@ -101,8 +100,9 @@ const clothingSchema = new mongoose.Schema({
         name: { type: String }, 
         image: { type: String } 
     }], 
-    createdAt: { type: Date, default: Date.now }
+    createdAt: { type: Date, default: Date.now, index: true }
 });
+
 const Clothing = mongoose.model('Clothing', clothingSchema);
 
 const favoriteSchema = new mongoose.Schema({
@@ -192,25 +192,22 @@ function fetchGoogleUserInfo(accessToken) {
     });
 }
 
-const safeDeleteImage = (imageUrl) => {
-    if (!imageUrl || typeof imageUrl !== 'string') return;
+// دالة حذف الصورة الدائمة من Cloudinary عند مسح المنتج
+const safeDeleteImage = async (imageUrl) => {
+    if (!imageUrl || typeof imageUrl !== 'string' || !imageUrl.includes('cloudinary.com')) return;
     try {
-        const filename = imageUrl.split('/uploads/')[1];
-        if (filename) {
-            const safeFileName = path.basename(filename);
-            const filePath = path.join(uploadsDir, safeFileName);
-            if (fs.existsSync(filePath)) {
-                fs.unlinkSync(filePath);
-            }
-        }
+        const parts = imageUrl.split('/');
+        const fileNameWithExt = parts[parts.length - 1];
+        const folderName = parts[parts.length - 2];
+        const publicId = `${folderName}/${fileNameWithExt.split('.')[0]}`;
+        await cloudinary.uploader.destroy(publicId);
     } catch (err) {
-        console.error(`فشل حذف الملف: ${imageUrl}`, err);
+        console.error(`فشل حذف الصورة من Cloudinary: ${imageUrl}`, err);
     }
 };
 
 // ================= الـ API Routes =================
 
-// مسار الاختبار الرئيسي
 app.get('/', (req, res) => {
     res.json({ message: "Makeup Studio API is running smoothly 🚀" });
 });
@@ -292,7 +289,7 @@ app.post('/api/auth/google', async (req, res) => {
 app.get('/api/favorites/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
-        const favorites = await Favorite.find({ userId }).populate('productId');
+        const favorites = await Favorite.find({ userId }).populate('productId').lean();
         const items = favorites
             .filter(f => f.productId != null)
             .map(f => f.productId);
@@ -392,7 +389,7 @@ app.get('/api/users/:id', async (req, res) => {
         if (!mongoose.Types.ObjectId.isValid(userId)) {
             return res.status(404).json({ message: "المستخدم غير موجود" });
         }
-        const user = await User.findById(userId).select('-password'); 
+        const user = await User.findById(userId).select('-password').lean(); 
         if (!user) return res.status(404).json({ message: "المستخدم غير موجود" });
         res.json(user);
     } catch (error) {
@@ -458,18 +455,20 @@ app.put('/api/users/update-profile', async (req, res) => {
 
 // ---------------- 🟢 روابط الأقسام والمنتجات والصور ----------------
 
+// مسار رفع الصور إلى Cloudinary وإعادة رابط HTTPS الدائم
 app.post('/api/upload', upload.single('image'), (req, res) => {
     if (!req.file) return res.status(400).json({ message: 'لم يتم رفع أي ملف' });
     
-    // إرجاع المسار النسبي فقط دون إضافة localhost أو الهوست
-    const imageUrl = `/uploads/${req.file.filename}`;
-    res.json({ imageUrl });
+    // إرجاع رابط الصورة المباشر والدائم من Cloudinary
+    res.json({ imageUrl: req.file.path });
 });
 
 app.get('/api/categories', async (req, res) => {
     try {
-        const customCategories = await Category.find().distinct('name');
-        const productCategories = await Clothing.distinct('category');
+        const [customCategories, productCategories] = await Promise.all([
+            Category.distinct('name'),
+            Clothing.distinct('category')
+        ]);
 
         const allCategories = Array.from(new Set([...customCategories, ...productCategories]))
             .filter(cat => cat && cat.trim() !== '');
@@ -520,6 +519,7 @@ app.delete('/api/categories/:idOrName', async (req, res) => {
     }
 });
 
+// استعلام سريعة جداً باستغلال Lean & Indexing
 app.get('/api/clothes', async (req, res) => {
     try {
         const { category, subcategory } = req.query;
@@ -532,7 +532,7 @@ app.get('/api/clothes', async (req, res) => {
             query.subcategory = subcategory;
         }
 
-        const clothes = await Clothing.find(query).sort({ createdAt: -1 });
+        const clothes = await Clothing.find(query).sort({ createdAt: -1 }).lean();
         res.json(clothes);
     } catch (error) {
         res.status(500).json({ message: "حدث خطأ أثناء جلب البيانات" });
@@ -591,18 +591,23 @@ app.delete('/api/clothes/:id', async (req, res) => {
             return res.status(404).json({ message: "هذه القطعة غير موجودة بالفعل" });
         }
 
-        safeDeleteImage(cloth.mainImage);
+        // مسح الصورة الرئيسية والصور الفرعية من Cloudinary
+        await safeDeleteImage(cloth.mainImage);
 
         if (cloth.variants && cloth.variants.length > 0) {
-            cloth.variants.forEach(variant => safeDeleteImage(variant.image));
+            for (const variant of cloth.variants) {
+                await safeDeleteImage(variant.image);
+            }
         }
 
         if (cloth.variantGroups && cloth.variantGroups.length > 0) {
-            cloth.variantGroups.forEach(group => {
+            for (const group of cloth.variantGroups) {
                 if (group.options) {
-                    group.options.forEach(opt => safeDeleteImage(opt.image));
+                    for (const opt of group.options) {
+                        await safeDeleteImage(opt.image);
+                    }
                 }
-            });
+            }
         }
 
         await Clothing.findByIdAndDelete(id);
@@ -628,13 +633,13 @@ app.get('/api/users/check-admin/:id', async (req, res) => {
         if (userId === '64b0f1a2c3d4e5f6a7b8c9d0' || userId === 'developer_admin_id') return res.json({ isAdmin: true });
         if (!mongoose.Types.ObjectId.isValid(userId)) return res.json({ isAdmin: false });
 
-        const user = await User.findById(userId);
+        const user = await User.findById(userId).lean();
         if (user) {
             if (user.email === 'makeupstudio@gmail.com' || user.role === 'admin') return res.json({ isAdmin: true });
-            const isAdminEmail = await Admin.findOne({ email: user.email });
+            const isAdminEmail = await Admin.findOne({ email: user.email }).lean();
             if (isAdminEmail) return res.json({ isAdmin: true });
         }
-        const adminById = await Admin.findById(userId);
+        const adminById = await Admin.findById(userId).lean();
         if (adminById) return res.json({ isAdmin: true });
 
         res.json({ isAdmin: false });
@@ -667,7 +672,7 @@ app.post('/api/orders', async (req, res) => {
 
 app.get('/api/orders', async (req, res) => {
     try {
-        const orders = await Order.find().sort({ createdAt: -1 });
+        const orders = await Order.find().sort({ createdAt: -1 }).lean();
 
         const productIds = [];
         orders.forEach(order => {
@@ -680,13 +685,12 @@ app.get('/api/orders', async (req, res) => {
             }
         });
 
-        const products = await Clothing.find({ _id: { $in: productIds } });
+        const products = await Clothing.find({ _id: { $in: productIds } }).lean();
         const productMap = new Map(products.map(p => [p._id.toString(), p]));
 
         const populatedOrders = orders.map(order => {
-            const orderObj = order.toObject();
-            if (orderObj.items && orderObj.items.length > 0) {
-                orderObj.items.forEach(item => {
+            if (order.items && order.items.length > 0) {
+                order.items.forEach(item => {
                     if (item.productId && productMap.has(item.productId.toString())) {
                         const product = productMap.get(item.productId.toString());
                         
@@ -714,7 +718,7 @@ app.get('/api/orders', async (req, res) => {
                     }
                 });
             }
-            return orderObj;
+            return order;
         });
 
         res.json(populatedOrders);
@@ -770,21 +774,20 @@ app.post('/api/bookings', async (req, res) => {
 
 app.get('/api/bookings', async (req, res) => {
     try {
-        const bookings = await Booking.find().sort({ createdAt: -1 });
+        const bookings = await Booking.find().sort({ createdAt: -1 }).lean();
 
         const productIds = bookings
             .map(b => b.product)
             .filter(id => id && mongoose.Types.ObjectId.isValid(id));
 
-        const products = await Clothing.find({ _id: { $in: productIds } });
+        const products = await Clothing.find({ _id: { $in: productIds } }).lean();
         const productMap = new Map(products.map(p => [p._id.toString(), p]));
 
         const populatedBookings = bookings.map(b => {
-            const bookingObj = b.toObject();
-            if (bookingObj.product && productMap.has(bookingObj.product.toString())) {
-                bookingObj.product = productMap.get(bookingObj.product.toString());
+            if (b.product && productMap.has(b.product.toString())) {
+                b.product = productMap.get(b.product.toString());
             }
-            return bookingObj;
+            return b;
         });
 
         res.json(populatedBookings);
