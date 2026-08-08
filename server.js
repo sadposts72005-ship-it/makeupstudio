@@ -8,6 +8,7 @@ const https = require('https');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
+const compression = require('compression'); // ⚡ لتخفيف السيرفر وسرعة نقل البيانات
 
 // مكتبات Cloudinary لتخزين الصور بشكل دائم
 const cloudinary = require('cloudinary').v2;
@@ -21,6 +22,11 @@ const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_change_in_pro
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '661574967799-jrv9c3s98t3u5g19nrdcatd80qrmovib.apps.googleusercontent.com';
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
+// ================= 🚀 تحسين أداء السيرفر وخفتة =================
+app.use(compression()); // ضغط الاستجابات لتسريع التطبيق واستجابة الـ JSON
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
 // ================= 🌐 إعدادات الـ CORS الكاملة =================
 const corsOptions = {
     origin: '*',
@@ -32,9 +38,8 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.options(/(.*)/, cors(corsOptions)); 
-app.use(express.json());
 
-// ================= ☁️ إعداد Cloudinary لرفع الصور بشكل دائم =================
+// ================= ☁️ إعداد Cloudinary لرفع الصور بشكل دائم ومضغوط =================
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -46,16 +51,36 @@ const storage = new CloudinaryStorage({
   params: {
     folder: 'makeup_studio_uploads',
     allowed_formats: ['jpg', 'png', 'jpeg', 'webp'],
+    transformation: [{ quality: 'auto', fetch_format: 'auto' }] // ⚡ ضغط حجم الصور تلقائياً لسرعة التحميل بـ Flutter
   },
 });
 
 const upload = multer({ 
     storage: storage,
-    limits: { fileSize: 5 * 1024 * 1024 } // حد أقصى 5 ميجابايت للصورة
+    limits: { fileSize: 10 * 1024 * 1024 } // حد أقصى 10 ميجابايت للصورة
 });
 
+// دالة مساعدة لرفع الصور إذا تم إرسالها كـ Base64
+const uploadBase64ToCloudinary = async (base64String) => {
+    if (!base64String || typeof base64String !== 'string' || !base64String.startsWith('data:image')) {
+        return base64String;
+    }
+    try {
+        const result = await cloudinary.uploader.upload(base64String, {
+            folder: 'makeup_studio_uploads',
+            transformation: [{ quality: 'auto', fetch_format: 'auto' }]
+        });
+        return result.secure_url;
+    } catch (err) {
+        console.error("خطأ رفع Base64 لـ Cloudinary:", err);
+        return base64String;
+    }
+};
+
 // ================= الاتصال بقاعدة البيانات MongoDB Atlas =================
-mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/makeup_store')
+mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/makeup_store', {
+    maxPoolSize: 10, // تحسين عدد الاتصالات لتخفيف السيرفر
+})
   .then(() => console.log('تم الاتصال بقاعدة البيانات بنجاح! 🎉'))
   .catch((err) => console.error('فشل الاتصال بقاعدة البيانات:', err));
 
@@ -162,7 +187,7 @@ const bookingSchema = new mongoose.Schema({
 });
 const Booking = mongoose.model('Booking', bookingSchema);
 
-// ================= دوال مساعدة (Helper Functions) =================
+// ================= دوال مساعدة =================
 
 function fetchGoogleUserInfo(accessToken) {
     return new Promise((resolve, reject) => {
@@ -192,7 +217,7 @@ function fetchGoogleUserInfo(accessToken) {
     });
 }
 
-// دالة حذف الصورة الدائمة من Cloudinary عند مسح المنتج
+// دالة حذف الصورة الدائمة من Cloudinary عند مسح المنتج فقط
 const safeDeleteImage = async (imageUrl) => {
     if (!imageUrl || typeof imageUrl !== 'string' || !imageUrl.includes('cloudinary.com')) return;
     try {
@@ -455,12 +480,23 @@ app.put('/api/users/update-profile', async (req, res) => {
 
 // ---------------- 🟢 روابط الأقسام والمنتجات والصور ----------------
 
-// مسار رفع الصور إلى Cloudinary وإعادة رابط HTTPS الدائم
-app.post('/api/upload', upload.single('image'), (req, res) => {
-    if (!req.file) return res.status(400).json({ message: 'لم يتم رفع أي ملف' });
-    
-    // إرجاع رابط الصورة المباشر والدائم من Cloudinary
-    res.json({ imageUrl: req.file.path });
+// مسار رفع الصور الشامل (يدعم رفع ملف أو Base64 برابط دائم في Cloudinary)
+app.post('/api/upload', upload.single('image'), async (req, res) => {
+    try {
+        if (req.file && req.file.path) {
+            return res.json({ imageUrl: req.file.path });
+        }
+        
+        if (req.body && req.body.image && req.body.image.startsWith('data:image')) {
+            const uploadedUrl = await uploadBase64ToCloudinary(req.body.image);
+            return res.json({ imageUrl: uploadedUrl });
+        }
+
+        return res.status(400).json({ message: 'لم يتم استلام أي صورة' });
+    } catch (error) {
+        console.error("خطأ رفع الصورة:", error);
+        res.status(500).json({ message: "حدث خطأ أثناء رفع الصورة" });
+    }
 });
 
 app.get('/api/categories', async (req, res) => {
@@ -519,18 +555,13 @@ app.delete('/api/categories/:idOrName', async (req, res) => {
     }
 });
 
-// استعلام سريعة جداً باستغلال Lean & Indexing
 app.get('/api/clothes', async (req, res) => {
     try {
         const { category, subcategory } = req.query;
         let query = {};
 
-        if (category) {
-            query.category = category;
-        }
-        if (subcategory) {
-            query.subcategory = subcategory;
-        }
+        if (category) query.category = category;
+        if (subcategory) query.subcategory = subcategory;
 
         const clothes = await Clothing.find(query).sort({ createdAt: -1 }).lean();
         res.json(clothes);
@@ -539,9 +570,28 @@ app.get('/api/clothes', async (req, res) => {
     }
 });
 
-app.post('/api/clothes', async (req, res) => {
+// 📌 مسار إضافة منتج محروث ودقيق (يدعم رفع الملف المباشر أو الرابط أو Base64)
+app.post('/api/clothes', upload.single('image'), async (req, res) => {
     try {
-        const newCloth = new Clothing(req.body);
+        let productData = req.body;
+
+        // إذا أرسل فلاتر البيانات كمغلفة بداخل JSON string في data
+        if (typeof req.body.data === 'string') {
+            try { productData = JSON.parse(req.body.data); } catch (e) {}
+        }
+
+        // إذا رفع ملف صورة مباشر
+        if (req.file && req.file.path) {
+            productData.mainImage = req.file.path;
+        } else if (productData.mainImage && productData.mainImage.startsWith('data:image')) {
+            productData.mainImage = await uploadBase64ToCloudinary(productData.mainImage);
+        }
+
+        if (!productData.title || !productData.category || productData.originalPrice == null) {
+            return res.status(400).json({ message: "العنوان، القسم، والسعر الأصلي حقول مطلوبة" });
+        }
+
+        const newCloth = new Clothing(productData);
         const savedCloth = await newCloth.save();
         res.status(201).json({ message: "تم الحفظ في قاعدة البيانات بنجاح!", item: savedCloth });
     } catch (error) {
@@ -550,7 +600,8 @@ app.post('/api/clothes', async (req, res) => {
     }
 });
 
-app.put('/api/clothes/:id', async (req, res) => {
+// 📌 مسار تعديل منتج (يدعم تعديل الصورة أيضاً)
+app.put('/api/clothes/:id', upload.single('image'), async (req, res) => {
     try {
         const { id } = req.params;
 
@@ -558,9 +609,20 @@ app.put('/api/clothes/:id', async (req, res) => {
             return res.status(400).json({ message: "معرف غير صالح" });
         }
 
+        let updateData = req.body;
+        if (typeof req.body.data === 'string') {
+            try { updateData = JSON.parse(req.body.data); } catch (e) {}
+        }
+
+        if (req.file && req.file.path) {
+            updateData.mainImage = req.file.path;
+        } else if (updateData.mainImage && updateData.mainImage.startsWith('data:image')) {
+            updateData.mainImage = await uploadBase64ToCloudinary(updateData.mainImage);
+        }
+
         const updatedCloth = await Clothing.findByIdAndUpdate(
             id,
-            { $set: req.body },
+            { $set: updateData },
             { new: true, runValidators: true }
         );
 
@@ -591,7 +653,7 @@ app.delete('/api/clothes/:id', async (req, res) => {
             return res.status(404).json({ message: "هذه القطعة غير موجودة بالفعل" });
         }
 
-        // مسح الصورة الرئيسية والصور الفرعية من Cloudinary
+        // مسح الصورة من Cloudinary
         await safeDeleteImage(cloth.mainImage);
 
         if (cloth.variants && cloth.variants.length > 0) {
@@ -808,7 +870,7 @@ app.put('/api/bookings/:id', async (req, res) => {
         );
         if (!updatedBooking) return res.status(404).json({ message: "الحجز غير موجود" });
 
-        res.json({ message: "تم تحديث حالة الحجز بنجاح", booking: updatedBooking });
+        res.json({ message: "تم تحديث حالة الحجز بنجاح", order: updatedBooking });
     } catch (error) {
         res.status(500).json({ message: "حدث خطأ أثناء تحديث الحجز" });
     }
@@ -845,5 +907,5 @@ app.delete('/api/users/:id', async (req, res) => {
 
 // تشغيل السيرفر
 app.listen(PORT, () => {
-    console.log(`السيرفر شغال وزاهي على البورت: ${PORT} 🚀`);
+    console.log(`السيرفر شغال وزاهي وخفيف على البورت: ${PORT} 🚀`);
 });
