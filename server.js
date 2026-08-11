@@ -16,6 +16,10 @@ const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
 const app = express();
+
+// ⚡ حل مشكلة الـ HTTPS و Mixed Content عند رفع الموقع أونلاين
+app.set('trust proxy', 1);
+
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_change_in_production';
 
@@ -24,9 +28,9 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '661574967799-jrv9c3s98
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // ================= 🚀 تحسين أداء السيرفر وخفته =================
-app.use(compression()); // ضغط الاستجابات لتسريع التطبيق واستجابة الـ JSON
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(compression()); 
+app.use(express.json({ limit: '15mb' }));
+app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 
 // ================= 🌐 إعدادات الـ CORS الكاملة =================
 const corsOptions = {
@@ -84,22 +88,24 @@ if (isCloudinaryConfigured) {
 
 const upload = multer({ 
     storage: storage,
-    limits: { fileSize: 10 * 1024 * 1024 } // حد أقصى 10 ميجابايت للصورة
+    limits: { fileSize: 15 * 1024 * 1024 } 
 });
 
-// دالة جلب رابط الصورة سواء سحابي أو محلي
+// دالة جلب رابط الصورة مع دعم HTTPS
 const getFileUrl = (req, file) => {
     if (file.path && file.path.startsWith('http')) {
-        return file.path; // Cloudinary URL
+        return file.path; 
     }
-    return `${req.protocol}://${req.get('host')}/uploads/${file.filename}`; // Local URL
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+    return `${protocol}://${req.get('host')}/uploads/${file.filename}`;
 };
 
 // دالة مساعدة لرفع Base64
 const uploadBase64Image = async (req, base64String) => {
-    if (!base64String || typeof base64String !== 'string' || !base64String.startsWith('data:image')) {
-        return base64String;
-    }
+    if (!base64String || typeof base64String !== 'string') return base64String;
+    if (!base64String.startsWith('data:image') && !base64String.startsWith('http')) return base64String;
+    if (base64String.startsWith('http')) return base64String;
+
     if (isCloudinaryConfigured) {
         try {
             const result = await cloudinary.uploader.upload(base64String, {
@@ -111,13 +117,14 @@ const uploadBase64Image = async (req, base64String) => {
             console.error("خطأ رفع Base64 لـ Cloudinary:", err);
         }
     }
-    // حفظ محلي في حالة عدم وجود Cloudinary
+
     try {
         const base64Data = base64String.replace(/^data:image\/\w+;base64,/, '');
         const buffer = Buffer.from(base64Data, 'base64');
         const filename = `img-${Date.now()}-${Math.round(Math.random() * 1E9)}.jpg`;
         fs.writeFileSync(path.join(uploadsDir, filename), buffer);
-        return `${req.protocol}://${req.get('host')}/uploads/${filename}`;
+        const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+        return `${protocol}://${req.get('host')}/uploads/${filename}`;
     } catch (e) {
         console.error("خطأ حفظ Base64 محلياً:", e);
         return base64String;
@@ -538,17 +545,28 @@ app.put('/api/users/update-profile', async (req, res) => {
 
 // ---------------- 🟢 روابط الأقسام والمنتجات والصور ----------------
 
-// مسار رفع الصور الذكي (يرفع بنجاح دائماً سواء محلي أو Cloudinary)
-app.post('/api/upload', upload.single('image'), async (req, res) => {
+// 📌 مسار رفع الصور الذكي الشامل (يستقبل الصور بأي اسم حقل ويقبل Base64 ويرجع imageUrl و url)
+app.post('/api/upload', (req, res, next) => {
+    upload.any()(req, res, (err) => {
+        if (err) {
+            console.error("خطأ Multer أثناء الرفع:", err);
+            return res.status(400).json({ message: "فشل رفع الملف", error: err.message });
+        }
+        next();
+    });
+}, async (req, res) => {
     try {
-        if (req.file) {
-            const imageUrl = getFileUrl(req, req.file);
-            return res.json({ imageUrl: imageUrl });
+        let file = (req.files && req.files.length > 0) ? req.files[0] : req.file;
+
+        if (file) {
+            const imageUrl = getFileUrl(req, file);
+            return res.status(200).json({ imageUrl: imageUrl, url: imageUrl });
         }
         
-        if (req.body && req.body.image && req.body.image.startsWith('data:image')) {
-            const uploadedUrl = await uploadBase64Image(req, req.body.image);
-            return res.json({ imageUrl: uploadedUrl });
+        const rawImage = req.body.image || req.body.mainImage || req.body.file || req.body.photo;
+        if (rawImage && typeof rawImage === 'string') {
+            const uploadedUrl = await uploadBase64Image(req, rawImage);
+            return res.status(200).json({ imageUrl: uploadedUrl, url: uploadedUrl });
         }
 
         return res.status(400).json({ message: 'لم يتم استلام أي صورة' });
@@ -629,8 +647,13 @@ app.get('/api/clothes', async (req, res) => {
     }
 });
 
-// 📌 مسار إضافة المنتج المتكامل والذكي
-app.post('/api/clothes', upload.single('image'), async (req, res) => {
+// 📌 مسار إضافة المنتج (يقبل الصور بأي اسم حقل)
+app.post('/api/clothes', (req, res, next) => {
+    upload.any()(req, res, (err) => {
+        if (err) console.error("Multer error in clothes:", err);
+        next();
+    });
+}, async (req, res) => {
     try {
         let productData = req.body;
 
@@ -638,9 +661,10 @@ app.post('/api/clothes', upload.single('image'), async (req, res) => {
             try { productData = JSON.parse(req.body.data); } catch (e) {}
         }
 
-        if (req.file) {
-            productData.mainImage = getFileUrl(req, req.file);
-        } else if (productData.mainImage && productData.mainImage.startsWith('data:image')) {
+        let file = (req.files && req.files.length > 0) ? req.files[0] : req.file;
+        if (file) {
+            productData.mainImage = getFileUrl(req, file);
+        } else if (productData.mainImage) {
             productData.mainImage = await uploadBase64Image(req, productData.mainImage);
         }
 
@@ -658,7 +682,12 @@ app.post('/api/clothes', upload.single('image'), async (req, res) => {
 });
 
 // 📌 مسار تعديل منتج
-app.put('/api/clothes/:id', upload.single('image'), async (req, res) => {
+app.put('/api/clothes/:id', (req, res, next) => {
+    upload.any()(req, res, (err) => {
+        if (err) console.error("Multer error in put clothes:", err);
+        next();
+    });
+}, async (req, res) => {
     try {
         const { id } = req.params;
 
@@ -671,9 +700,10 @@ app.put('/api/clothes/:id', upload.single('image'), async (req, res) => {
             try { updateData = JSON.parse(req.body.data); } catch (e) {}
         }
 
-        if (req.file) {
-            updateData.mainImage = getFileUrl(req, req.file);
-        } else if (updateData.mainImage && updateData.mainImage.startsWith('data:image')) {
+        let file = (req.files && req.files.length > 0) ? req.files[0] : req.file;
+        if (file) {
+            updateData.mainImage = getFileUrl(req, file);
+        } else if (updateData.mainImage) {
             updateData.mainImage = await uploadBase64Image(req, updateData.mainImage);
         }
 
@@ -963,5 +993,5 @@ app.delete('/api/users/:id', async (req, res) => {
 
 // تشغيل السيرفر
 app.listen(PORT, () => {
-    console.log(`السيرفر شغال وخفيف وسريع على البورت: ${PORT} 🚀`);
+    console.log(`السيرفر شغال وزاهي وخفيف على البورت: ${PORT} 🚀`);
 });
