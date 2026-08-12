@@ -4,20 +4,16 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const multer = require('multer');
 const path = require('path');
-const fs = require('fs');
 const https = require('https');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
-const compression = require('compression'); // ⚡ لتخفيف السيرفر وسرعة نقل البيانات
-
-// مكتبات Cloudinary لتخزين الصور بشكل دائم
+const compression = require('compression'); 
 const cloudinary = require('cloudinary').v2;
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
 const app = express();
 
-// ⚡ حل مشكلة الـ HTTPS و Mixed Content عند رفع الموقع أونلاين
+// ⚡ حل مشكلة الـ HTTPS على Vercel
 app.set('trust proxy', 1);
 
 const PORT = process.env.PORT || 3000;
@@ -44,91 +40,48 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options(/(.*)/, cors(corsOptions)); 
 
-// ================= 📁 إعداد نظام التخزين الذكي للصور =================
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
-}
-app.use('/uploads', express.static(uploadsDir));
+// ================= 🧠 التخزين في الذاكرة (Vercel Serverless Ready) =================
+const storage = multer.memoryStorage(); // حفظ الصورة في الذاكرة لتجنب قيد الـ Read-Only في Vercel
+const upload = multer({ 
+    storage: storage,
+    limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+});
 
-// التحقق مما إذا كانت مفاتيح Cloudinary موجودة وحقيقية أم لا
 const isCloudinaryConfigured = process.env.CLOUDINARY_CLOUD_NAME && 
     !process.env.CLOUDINARY_CLOUD_NAME.includes('ضع_اسم') &&
     process.env.CLOUDINARY_CLOUD_NAME.trim() !== '';
 
-let storage;
-
 if (isCloudinaryConfigured) {
-    console.log("☁️ تم اكتشاف مفاتيح Cloudinary: جاري استخدام التخزين السحابي");
     cloudinary.config({
       cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
       api_key: process.env.CLOUDINARY_API_KEY,
       api_secret: process.env.CLOUDINARY_API_SECRET
     });
-
-    storage = new CloudinaryStorage({
-      cloudinary: cloudinary,
-      params: {
-        folder: 'makeup_studio_uploads',
-        allowed_formats: ['jpg', 'png', 'jpeg', 'webp'],
-        transformation: [{ quality: 'auto', fetch_format: 'auto' }]
-      },
-    });
-} else {
-    console.log("📁 يتم استخدام التخزين المحلي الآمن للصور في مجلد /uploads");
-    storage = multer.diskStorage({
-        destination: (req, file, cb) => cb(null, uploadsDir),
-        filename: (req, file, cb) => {
-            const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-            const ext = path.extname(file.originalname) || '.jpg';
-            cb(null, 'img-' + uniqueSuffix + ext);
-        }
-    });
 }
 
-const upload = multer({ 
-    storage: storage,
-    limits: { fileSize: 15 * 1024 * 1024 } 
-});
-
-// دالة جلب رابط الصورة مع دعم HTTPS
-const getFileUrl = (req, file) => {
-    if (file.path && file.path.startsWith('http')) {
-        return file.path; 
-    }
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-    return `${protocol}://${req.get('host')}/uploads/${file.filename}`;
-};
-
-// دالة مساعدة لرفع Base64
-const uploadBase64Image = async (req, base64String) => {
-    if (!base64String || typeof base64String !== 'string') return base64String;
-    if (!base64String.startsWith('data:image') && !base64String.startsWith('http')) return base64String;
-    if (base64String.startsWith('http')) return base64String;
+// دالة معالجة الصورة في الذاكرة وتحويلها لرابط Cloudinary أو Base64 يشتغل 100% على Vercel
+const processUploadedFile = async (file) => {
+    if (!file || !file.buffer) return null;
 
     if (isCloudinaryConfigured) {
-        try {
-            const result = await cloudinary.uploader.upload(base64String, {
-                folder: 'makeup_studio_uploads',
-                transformation: [{ quality: 'auto', fetch_format: 'auto' }]
-            });
-            return result.secure_url;
-        } catch (err) {
-            console.error("خطأ رفع Base64 لـ Cloudinary:", err);
-        }
+        return new Promise((resolve) => {
+            const uploadStream = cloudinary.uploader.upload_stream(
+                { folder: 'makeup_studio_uploads', transformation: [{ quality: 'auto', fetch_format: 'auto' }] },
+                (error, result) => {
+                    if (error || !result) {
+                        const mime = file.mimetype || 'image/jpeg';
+                        return resolve(`data:${mime};base64,${file.buffer.toString('base64')}`);
+                    }
+                    resolve(result.secure_url);
+                }
+            );
+            uploadStream.end(file.buffer);
+        });
     }
 
-    try {
-        const base64Data = base64String.replace(/^data:image\/\w+;base64,/, '');
-        const buffer = Buffer.from(base64Data, 'base64');
-        const filename = `img-${Date.now()}-${Math.round(Math.random() * 1E9)}.jpg`;
-        fs.writeFileSync(path.join(uploadsDir, filename), buffer);
-        const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-        return `${protocol}://${req.get('host')}/uploads/${filename}`;
-    } catch (e) {
-        console.error("خطأ حفظ Base64 محلياً:", e);
-        return base64String;
-    }
+    // بدون Cloudinary: تحويل لـ Base64 مباشر يعمل بامتياز على Vercel و MongoDB
+    const mime = file.mimetype || 'image/jpeg';
+    return `data:${mime};base64,${file.buffer.toString('base64')}`;
 };
 
 // ================= الاتصال بقاعدة البيانات MongoDB Atlas =================
@@ -283,23 +236,13 @@ const safeDeleteImage = async (imageUrl) => {
         } catch (err) {
             console.error(`فشل حذف الصورة من Cloudinary: ${imageUrl}`, err);
         }
-    } else if (imageUrl.includes('/uploads/')) {
-        try {
-            const filename = imageUrl.split('/uploads/')[1];
-            const filePath = path.join(uploadsDir, filename);
-            if (fs.existsSync(filePath)) {
-                fs.unlinkSync(filePath);
-            }
-        } catch (err) {
-            console.error("خطأ حذف الملف المحلي:", err);
-        }
     }
 };
 
 // ================= الـ API Routes =================
 
 app.get('/', (req, res) => {
-    res.json({ message: "Makeup Studio API is running smoothly 🚀" });
+    res.json({ message: "Makeup Studio API is running smoothly on Vercel 🚀" });
 });
 
 // ---------------- 🔴 روابط التسجيل ودخول جوجل ----------------
@@ -545,11 +488,11 @@ app.put('/api/users/update-profile', async (req, res) => {
 
 // ---------------- 🟢 روابط الأقسام والمنتجات والصور ----------------
 
-// 📌 مسار رفع الصور الذكي الشامل (يستقبل الصور بأي اسم حقل ويقبل Base64 ويرجع imageUrl و url)
+// 📌 مسار رفع الصور الشامل والمتوافق مع Vercel
 app.post('/api/upload', (req, res, next) => {
     upload.any()(req, res, (err) => {
         if (err) {
-            console.error("خطأ Multer أثناء الرفع:", err);
+            console.error("Multer error:", err);
             return res.status(400).json({ message: "فشل رفع الملف", error: err.message });
         }
         next();
@@ -559,14 +502,13 @@ app.post('/api/upload', (req, res, next) => {
         let file = (req.files && req.files.length > 0) ? req.files[0] : req.file;
 
         if (file) {
-            const imageUrl = getFileUrl(req, file);
+            const imageUrl = await processUploadedFile(file);
             return res.status(200).json({ imageUrl: imageUrl, url: imageUrl });
         }
         
         const rawImage = req.body.image || req.body.mainImage || req.body.file || req.body.photo;
         if (rawImage && typeof rawImage === 'string') {
-            const uploadedUrl = await uploadBase64Image(req, rawImage);
-            return res.status(200).json({ imageUrl: uploadedUrl, url: uploadedUrl });
+            return res.status(200).json({ imageUrl: rawImage, url: rawImage });
         }
 
         return res.status(400).json({ message: 'لم يتم استلام أي صورة' });
@@ -582,13 +524,10 @@ app.get('/api/categories', async (req, res) => {
             Category.distinct('name'),
             Clothing.distinct('category')
         ]);
-
         const allCategories = Array.from(new Set([...customCategories, ...productCategories]))
             .filter(cat => cat && cat.trim() !== '');
-
         res.json(allCategories);
     } catch (error) {
-        console.error("خطأ جلب الأقسام:", error);
         res.status(500).json({ message: "حدث خطأ أثناء جلب الأقسام" });
     }
 });
@@ -596,21 +535,13 @@ app.get('/api/categories', async (req, res) => {
 app.post('/api/categories', async (req, res) => {
     try {
         const { name } = req.body;
-        if (!name || !name.trim()) {
-            return res.status(400).json({ message: "اسم القسم مطلوب" });
-        }
-
+        if (!name || !name.trim()) return res.status(400).json({ message: "اسم القسم مطلوب" });
         const existingCategory = await Category.findOne({ name: name.trim() });
-        if (existingCategory) {
-            return res.status(400).json({ message: "هذا القسم موجود بالفعل" });
-        }
-
+        if (existingCategory) return res.status(400).json({ message: "هذا القسم موجود بالفعل" });
         const newCategory = new Category({ name: name.trim() });
         await newCategory.save();
-
         res.status(201).json({ message: "تم إضافة القسم بنجاح 🎉", category: newCategory });
     } catch (error) {
-        console.error("خطأ إضافة قسم:", error);
         res.status(500).json({ message: "حدث خطأ أثناء إضافة القسم", error: error.message });
     }
 });
@@ -618,16 +549,13 @@ app.post('/api/categories', async (req, res) => {
 app.delete('/api/categories/:idOrName', async (req, res) => {
     try {
         const { idOrName } = req.params;
-
         if (mongoose.Types.ObjectId.isValid(idOrName)) {
             await Category.findByIdAndDelete(idOrName);
         } else {
             await Category.deleteOne({ name: idOrName });
         }
-
         res.json({ message: "تم حذف القسم بنجاح 🗑️" });
     } catch (error) {
-        console.error("خطأ حذف القسم:", error);
         res.status(500).json({ message: "حدث خطأ أثناء حذف القسم" });
     }
 });
@@ -636,10 +564,8 @@ app.get('/api/clothes', async (req, res) => {
     try {
         const { category, subcategory } = req.query;
         let query = {};
-
         if (category) query.category = category;
         if (subcategory) query.subcategory = subcategory;
-
         const clothes = await Clothing.find(query).sort({ createdAt: -1 }).lean();
         res.json(clothes);
     } catch (error) {
@@ -647,7 +573,7 @@ app.get('/api/clothes', async (req, res) => {
     }
 });
 
-// 📌 مسار إضافة المنتج (يقبل الصور بأي اسم حقل)
+// 📌 مسار إضافة المنتج (متوافق مع Vercel)
 app.post('/api/clothes', (req, res, next) => {
     upload.any()(req, res, (err) => {
         if (err) console.error("Multer error in clothes:", err);
@@ -663,9 +589,7 @@ app.post('/api/clothes', (req, res, next) => {
 
         let file = (req.files && req.files.length > 0) ? req.files[0] : req.file;
         if (file) {
-            productData.mainImage = getFileUrl(req, file);
-        } else if (productData.mainImage) {
-            productData.mainImage = await uploadBase64Image(req, productData.mainImage);
+            productData.mainImage = await processUploadedFile(file);
         }
 
         if (!productData.title || !productData.category || productData.originalPrice == null) {
@@ -690,7 +614,6 @@ app.put('/api/clothes/:id', (req, res, next) => {
 }, async (req, res) => {
     try {
         const { id } = req.params;
-
         if (!mongoose.Types.ObjectId.isValid(id)) {
             return res.status(400).json({ message: "معرف غير صالح" });
         }
@@ -702,9 +625,7 @@ app.put('/api/clothes/:id', (req, res, next) => {
 
         let file = (req.files && req.files.length > 0) ? req.files[0] : req.file;
         if (file) {
-            updateData.mainImage = getFileUrl(req, file);
-        } else if (updateData.mainImage) {
-            updateData.mainImage = await uploadBase64Image(req, updateData.mainImage);
+            updateData.mainImage = await processUploadedFile(file);
         }
 
         const updatedCloth = await Clothing.findByIdAndUpdate(
@@ -713,14 +634,8 @@ app.put('/api/clothes/:id', (req, res, next) => {
             { new: true, runValidators: true }
         );
 
-        if (!updatedCloth) {
-            return res.status(404).json({ message: "المنتج غير موجود" });
-        }
-
-        res.json({
-            message: "تم تحديث المنتج بنجاح! ✨",
-            item: updatedCloth
-        });
+        if (!updatedCloth) return res.status(404).json({ message: "المنتج غير موجود" });
+        res.json({ message: "تم تحديث المنتج بنجاح! ✨", item: updatedCloth });
     } catch (error) {
         console.error("خطأ أثناء تحديث المنتج:", error);
         res.status(500).json({ message: "حدث خطأ أثناء تحديث المنتج", error: error.message });
@@ -730,45 +645,18 @@ app.put('/api/clothes/:id', (req, res, next) => {
 app.delete('/api/clothes/:id', async (req, res) => {
     try {
         const { id } = req.params;
-
-        if (!mongoose.Types.ObjectId.isValid(id)) {
-            return res.status(400).json({ message: "معرف غير صالح" });
-        }
+        if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: "معرف غير صالح" });
 
         const cloth = await Clothing.findById(id);
-        if (!cloth) {
-            return res.status(404).json({ message: "هذه القطعة غير موجودة بالفعل" });
-        }
+        if (!cloth) return res.status(404).json({ message: "هذه القطعة غير موجودة بالفعل" });
 
         await safeDeleteImage(cloth.mainImage);
-
-        if (cloth.variants && cloth.variants.length > 0) {
-            for (const variant of cloth.variants) {
-                await safeDeleteImage(variant.image);
-            }
-        }
-
-        if (cloth.variantGroups && cloth.variantGroups.length > 0) {
-            for (const group of cloth.variantGroups) {
-                if (group.options) {
-                    for (const opt of group.options) {
-                        await safeDeleteImage(opt.image);
-                    }
-                }
-            }
-        }
-
         await Clothing.findByIdAndDelete(id);
         await Favorite.deleteMany({ productId: id });
         await Booking.deleteMany({ "product._id": id });
 
-        res.json({ 
-            message: "تم مسح القطعة وجميع صورها وبياناتها بنجاح! 🗑️", 
-            item: cloth 
-        });
-
+        res.json({ message: "تم مسح القطعة بنجاح! 🗑️", item: cloth });
     } catch (error) {
-        console.error("خطأ أثناء حذف القطعة:", error);
         res.status(500).json({ message: "حدث خطأ أثناء مسح القطعة" });
     }
 });
@@ -991,7 +879,12 @@ app.delete('/api/users/:id', async (req, res) => {
     }
 });
 
-// تشغيل السيرفر
-app.listen(PORT, () => {
-    console.log(`السيرفر شغال وزاهي وخفيف على البورت: ${PORT} 🚀`);
-});
+// ---------------- إعداد التوافق مع Vercel ----------------
+if (process.env.NODE_ENV !== 'production') {
+    app.listen(PORT, () => {
+        console.log(`السيرفر شغال وزاهي على البورت: ${PORT} 🚀`);
+    });
+}
+
+// تصدير التطبيق ليكون جاهزاً لـ Vercel Serverless
+module.exports = app;
