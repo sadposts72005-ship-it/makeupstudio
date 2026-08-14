@@ -3,8 +3,6 @@ const express = require('express');
 const cors = require('cors'); 
 const mongoose = require('mongoose');
 const multer = require('multer');
-const path = require('path');
-const https = require('https');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
@@ -13,7 +11,7 @@ const cloudinary = require('cloudinary').v2;
 
 const app = express();
 
-// ⚡ حل مشكلة الـ HTTPS على Vercel
+// ⚡ حل مشكلة الـ HTTPS والبروكسي على Vercel
 app.set('trust proxy', 1);
 
 const PORT = process.env.PORT || 3000;
@@ -25,26 +23,25 @@ const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // ================= 🚀 تحسين أداء السيرفر وخفته =================
 app.use(compression()); 
-app.use(express.json({ limit: '15mb' }));
-app.use(express.urlencoded({ extended: true, limit: '15mb' }));
+app.use(express.json({ limit: '20mb' }));
+app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
-// ================= 🌐 إعدادات الـ CORS الكاملة =================
-const corsOptions = {
-    origin: '*',
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
-    credentials: true,
-    optionsSuccessStatus: 200
-};
+// ================= 🌐 إعدادات الـ CORS المباشرة والفورية =================
+app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
+    if (req.method === 'OPTIONS') {
+        return res.status(200).end();
+    }
+    next();
+});
 
-app.use(cors(corsOptions));
-app.options(/(.*)/, cors(corsOptions)); 
-
-// ================= 🧠 التخزين في الذاكرة (Vercel Serverless Ready) =================
-const storage = multer.memoryStorage(); // حفظ الصورة في الذاكرة لتجنب قيد الـ Read-Only في Vercel
+// ================= 🧠 التخزين في الذاكرة لـ Multer و Cloudinary =================
+const storage = multer.memoryStorage();
 const upload = multer({ 
     storage: storage,
-    limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+    limits: { fileSize: 15 * 1024 * 1024 } // 15MB limit
 });
 
 const isCloudinaryConfigured = process.env.CLOUDINARY_CLOUD_NAME && 
@@ -59,7 +56,6 @@ if (isCloudinaryConfigured) {
     });
 }
 
-// دالة معالجة الصورة في الذاكرة وتحويلها لرابط Cloudinary أو Base64 يشتغل 100% على Vercel
 const processUploadedFile = async (file) => {
     if (!file || !file.buffer) return null;
 
@@ -79,17 +75,51 @@ const processUploadedFile = async (file) => {
         });
     }
 
-    // بدون Cloudinary: تحويل لـ Base64 مباشر يعمل بامتياز على Vercel و MongoDB
     const mime = file.mimetype || 'image/jpeg';
     return `data:${mime};base64,${file.buffer.toString('base64')}`;
 };
 
-// ================= الاتصال بقاعدة البيانات MongoDB Atlas =================
-mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/makeup_store', {
-    maxPoolSize: 10,
-})
-  .then(() => console.log('تم الاتصال بقاعدة البيانات بنجاح! 🎉'))
-  .catch((err) => console.error('فشل الاتصال بقاعدة البيانات:', err));
+// ================= 🟢 اتصال ذكي ومستدام بقاعدة البيانات (Global Caching) =================
+let cached = global.mongoose;
+if (!cached) {
+    cached = global.mongoose = { conn: null, promise: null };
+}
+
+async function connectDB() {
+    if (cached.conn) {
+        return cached.conn;
+    }
+
+    if (!cached.promise) {
+        const opts = {
+            bufferCommands: false,
+            maxPoolSize: 10,
+            serverSelectionTimeoutMS: 5000,
+            socketTimeoutMS: 45000,
+        };
+        const mongoUri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/makeup_store';
+        cached.promise = mongoose.connect(mongoUri, opts).then((m) => m);
+    }
+
+    try {
+        cached.conn = await cached.promise;
+    } catch (e) {
+        cached.promise = null;
+        throw e;
+    }
+    return cached.conn;
+}
+
+// 🟢 ميديولوير الاتصال الخاطف بالسيرفر قبل تنفيذ الروابط
+app.use(async (req, res, next) => {
+    try {
+        await connectDB();
+        next();
+    } catch (err) {
+        console.error("خطأ في الاتصال بقاعدة البيانات:", err);
+        res.status(500).json({ message: "السيرفر يقدم استجابة مؤقتة، يرجى إعادة المحاولة" });
+    }
+});
 
 // ================= الـ Schemas والموديلات (Models) =================
 
@@ -242,7 +272,7 @@ const safeDeleteImage = async (imageUrl) => {
 // ================= الـ API Routes =================
 
 app.get('/', (req, res) => {
-    res.json({ message: "Makeup Studio API is running smoothly on Vercel 🚀" });
+    res.json({ message: "Makeup Studio API is running super fast on Vercel 🚀" });
 });
 
 // ---------------- 🔴 روابط التسجيل ودخول جوجل ----------------
@@ -488,7 +518,6 @@ app.put('/api/users/update-profile', async (req, res) => {
 
 // ---------------- 🟢 روابط الأقسام والمنتجات والصور ----------------
 
-// 📌 مسار رفع الصور الشامل والمتوافق مع Vercel
 app.post('/api/upload', (req, res, next) => {
     upload.any()(req, res, (err) => {
         if (err) {
@@ -520,6 +549,9 @@ app.post('/api/upload', (req, res, next) => {
 
 app.get('/api/categories', async (req, res) => {
     try {
+        // ⚡ إضافة كاش ذكي للـ Edge Server لتسريع تحميل الأقسام
+        res.setHeader('Cache-Control', 's-maxage=1, stale-while-revalidate=59');
+
         const [customCategories, productCategories] = await Promise.all([
             Category.distinct('name'),
             Clothing.distinct('category')
@@ -562,6 +594,9 @@ app.delete('/api/categories/:idOrName', async (req, res) => {
 
 app.get('/api/clothes', async (req, res) => {
     try {
+        // ⚡ سرعة فائقة مع كاش Vercel المباشر
+        res.setHeader('Cache-Control', 's-maxage=1, stale-while-revalidate=59');
+
         const { category, subcategory } = req.query;
         let query = {};
         if (category) query.category = category;
@@ -573,7 +608,6 @@ app.get('/api/clothes', async (req, res) => {
     }
 });
 
-// 📌 مسار إضافة المنتج (متوافق مع Vercel)
 app.post('/api/clothes', (req, res, next) => {
     upload.any()(req, res, (err) => {
         if (err) console.error("Multer error in clothes:", err);
@@ -605,7 +639,6 @@ app.post('/api/clothes', (req, res, next) => {
     }
 });
 
-// 📌 مسار تعديل منتج
 app.put('/api/clothes/:id', (req, res, next) => {
     upload.any()(req, res, (err) => {
         if (err) console.error("Multer error in put clothes:", err);
@@ -879,12 +912,10 @@ app.delete('/api/users/:id', async (req, res) => {
     }
 });
 
-// ---------------- إعداد التوافق مع Vercel ----------------
 if (process.env.NODE_ENV !== 'production') {
     app.listen(PORT, () => {
         console.log(`السيرفر شغال وزاهي على البورت: ${PORT} 🚀`);
     });
 }
 
-// تصدير التطبيق ليكون جاهزاً لـ Vercel Serverless
 module.exports = app;
