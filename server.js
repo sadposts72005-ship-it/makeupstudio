@@ -185,14 +185,19 @@ const orderSchema = new mongoose.Schema({
 }, { strict: false });
 const Order = mongoose.model('Order', orderSchema);
 
+// ✅ bookingSchema مع userId
 const bookingSchema = new mongoose.Schema({
+    userId: { type: String, default: null }, // ✅ ربط الحجز بالمستخدم
     name: { type: String, required: true },
     phone: { type: String, required: true },
+    extraPhone: { type: String, default: null },
     deliveryTime: { type: String, required: true },
     selectedVariant: { type: String },
     selectedVariantImage: { type: String },
+    productTitle: { type: String },
+    productImage: { type: String },
     status: { type: String, default: 'قيد الانتظار' }, 
-    product: { type: mongoose.Schema.Types.Mixed, ref: 'Clothing' },
+    product: { type: mongoose.Schema.Types.Mixed },
     createdAt: { type: Date, default: Date.now }
 });
 const Booking = mongoose.model('Booking', bookingSchema);
@@ -235,7 +240,6 @@ const safeDeleteImage = async (imageUrl) => {
     }
 };
 
-// دالة مساعدة لتعبئة بيانات الطلبات بالصور من قاعدة البيانات
 async function populateOrdersWithImages(orders) {
     const productIds = [];
     orders.forEach(order => {
@@ -343,7 +347,6 @@ app.post('/api/auth/google', async (req, res) => {
     }
 });
 
-// ✅ register يرجع token و userId فوراً
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { name, email, password } = req.body;
@@ -358,7 +361,6 @@ app.post('/api/auth/register', async (req, res) => {
         const newUser = new User({ name, email, password: hashedPassword });
         await newUser.save();
 
-        // ✅ بنرجع token و userId مباشرة بدون الحاجة لـ login ثاني
         const token = jwt.sign({ userId: newUser._id, role: newUser.role }, JWT_SECRET, { expiresIn: '30d' });
 
         res.status(201).json({
@@ -392,7 +394,7 @@ app.post('/api/auth/login', async (req, res) => {
 
 // ---------------- Users ----------------
 
-// ⚠️ مهم: الـ routes الثابتة لازم تيجي قبل routes الـ :id
+// ⚠️ Routes الثابتة قبل :id
 app.get('/api/users/check-admin/:id', async (req, res) => {
     try {
         const userId = req.params.id;
@@ -445,6 +447,68 @@ app.put('/api/users/update-profile', async (req, res) => {
     } catch (error) {
         console.error("خطأ تحديث الملف الشخصي:", error);
         return res.status(500).json({ message: "حدث خطأ أثناء تحديث البيانات" });
+    }
+});
+
+// ✅ المستخدم يغير باسورده بنفسه
+app.put('/api/users/change-password', async (req, res) => {
+    try {
+        const { userId, oldPassword, newPassword } = req.body;
+
+        if (!userId || !oldPassword || !newPassword) {
+            return res.status(400).json({ message: "جميع الحقول مطلوبة" });
+        }
+
+        if (!mongoose.Types.ObjectId.isValid(userId)) {
+            return res.status(400).json({ message: "معرف غير صالح" });
+        }
+
+        const user = await User.findById(userId);
+        if (!user) return res.status(404).json({ message: "المستخدم غير موجود" });
+
+        const isMatch = await bcrypt.compare(oldPassword, user.password);
+        if (!isMatch) return res.status(401).json({ message: "❌ الباسورد الحالي غير صحيح" });
+
+        user.password = await bcrypt.hash(newPassword, 10);
+        await user.save();
+
+        res.json({ message: "✅ تم تغيير الباسورد بنجاح" });
+    } catch (error) {
+        res.status(500).json({ message: "حدث خطأ أثناء تغيير الباسورد" });
+    }
+});
+
+// ✅ الأدمن يعمل reset لباسورد أي مستخدم
+app.put('/api/admin/reset-password', async (req, res) => {
+    try {
+        const { email, newPassword } = req.body;
+
+        if (!email || !newPassword) {
+            return res.status(400).json({ message: "الإيميل والباسورد الجديد مطلوبان" });
+        }
+
+        const user = await User.findOne({ email: email.toLowerCase() });
+        if (!user) return res.status(404).json({ message: "المستخدم غير موجود" });
+
+        user.password = await bcrypt.hash(newPassword, 10);
+        await user.save();
+
+        res.json({ message: `✅ تم تغيير باسورد ${user.name} بنجاح` });
+    } catch (error) {
+        res.status(500).json({ message: "حدث خطأ أثناء إعادة ضبط الباسورد" });
+    }
+});
+
+// ✅ جلب كل المستخدمين للأدمن
+app.get('/api/admin/users', async (req, res) => {
+    try {
+        const users = await User.find()
+            .select('name email role createdAt')
+            .sort({ createdAt: -1 })
+            .lean();
+        res.json({ total: users.length, users });
+    } catch (error) {
+        res.status(500).json({ message: "خطأ في جلب المستخدمين" });
     }
 });
 
@@ -693,13 +757,13 @@ app.post('/api/orders', async (req, res) => {
     }
 });
 
-// ✅ جلب طلبات مستخدم معين (لازم يكون قبل /api/orders/:id)
+// ✅ قبل /api/orders/:id
 app.get('/api/orders/user/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
         if (!userId) return res.status(400).json({ message: "userId مطلوب" });
 
-        const orders = await Order.find({ userId: userId }).sort({ createdAt: -1 }).lean();
+        const orders = await Order.find({ userId }).sort({ createdAt: -1 }).lean();
         const populatedOrders = await populateOrdersWithImages(orders);
         res.json(populatedOrders);
     } catch (error) {
@@ -708,7 +772,6 @@ app.get('/api/orders/user/:userId', async (req, res) => {
     }
 });
 
-// جلب كل الطلبات (للأدمن)
 app.get('/api/orders', async (req, res) => {
     try {
         const orders = await Order.find().sort({ createdAt: -1 }).lean();
@@ -760,19 +823,24 @@ app.post('/api/bookings', async (req, res) => {
     }
 });
 
+// ✅ قبل /api/bookings/:id
+app.get('/api/bookings/user/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        if (!userId) return res.status(400).json({ message: "userId مطلوب" });
+
+        const bookings = await Booking.find({ userId }).sort({ createdAt: -1 }).lean();
+        res.json(bookings);
+    } catch (error) {
+        console.error("خطأ جلب حجوزات المستخدم:", error);
+        res.status(500).json({ message: "حدث خطأ أثناء جلب الحجوزات" });
+    }
+});
+
 app.get('/api/bookings', async (req, res) => {
     try {
         const bookings = await Booking.find().sort({ createdAt: -1 }).lean();
-        const productIds = bookings.map(b => b.product).filter(id => id && mongoose.Types.ObjectId.isValid(id));
-        const products = await Clothing.find({ _id: { $in: productIds } }).lean();
-        const productMap = new Map(products.map(p => [p._id.toString(), p]));
-        const populatedBookings = bookings.map(b => {
-            if (b.product && productMap.has(b.product.toString())) {
-                b.product = productMap.get(b.product.toString());
-            }
-            return b;
-        });
-        res.json(populatedBookings);
+        res.json(bookings);
     } catch (error) {
         res.status(500).json({ message: "حدث خطأ أثناء جلب الحجوزات" });
     }
@@ -786,7 +854,7 @@ app.put('/api/bookings/:id', async (req, res) => {
         const updatedBooking = await Booking.findByIdAndUpdate(id, { status: req.body.status }, { new: true });
         if (!updatedBooking) return res.status(404).json({ message: "الحجز غير موجود" });
 
-        res.json({ message: "تم تحديث حالة الحجز بنجاح", order: updatedBooking });
+        res.json({ message: "تم تحديث حالة الحجز بنجاح", booking: updatedBooking });
     } catch (error) {
         res.status(500).json({ message: "حدث خطأ أثناء تحديث الحجز" });
     }
