@@ -8,40 +8,34 @@ const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
 const compression = require('compression'); 
 const cloudinary = require('cloudinary').v2;
+const https = require('https');
 
 const app = express();
 
-// ⚡ حل مشكلة الـ HTTPS والبروكسي على Vercel
 app.set('trust proxy', 1);
 
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_change_in_production';
 
-// Client ID الخاص بجوجل
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '661574967799-jrv9c3s98t3u5g19nrdcatd80qrmovib.apps.googleusercontent.com';
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
-// ================= 🚀 تحسين أداء السيرفر وخفته =================
 app.use(compression()); 
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
-// ================= 🌐 إعدادات الـ CORS المباشرة والفورية =================
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
-    if (req.method === 'OPTIONS') {
-        return res.status(200).end();
-    }
+    if (req.method === 'OPTIONS') return res.status(200).end();
     next();
 });
 
-// ================= 🧠 التخزين في الذاكرة لـ Multer و Cloudinary =================
 const storage = multer.memoryStorage();
 const upload = multer({ 
     storage: storage,
-    limits: { fileSize: 15 * 1024 * 1024 } // 15MB limit
+    limits: { fileSize: 15 * 1024 * 1024 }
 });
 
 const isCloudinaryConfigured = process.env.CLOUDINARY_CLOUD_NAME && 
@@ -58,7 +52,6 @@ if (isCloudinaryConfigured) {
 
 const processUploadedFile = async (file) => {
     if (!file || !file.buffer) return null;
-
     if (isCloudinaryConfigured) {
         return new Promise((resolve) => {
             const uploadStream = cloudinary.uploader.upload_stream(
@@ -74,22 +67,15 @@ const processUploadedFile = async (file) => {
             uploadStream.end(file.buffer);
         });
     }
-
     const mime = file.mimetype || 'image/jpeg';
     return `data:${mime};base64,${file.buffer.toString('base64')}`;
 };
 
-// ================= 🟢 اتصال ذكي ومستدام بقاعدة البيانات (Global Caching) =================
 let cached = global.mongoose;
-if (!cached) {
-    cached = global.mongoose = { conn: null, promise: null };
-}
+if (!cached) cached = global.mongoose = { conn: null, promise: null };
 
 async function connectDB() {
-    if (cached.conn) {
-        return cached.conn;
-    }
-
+    if (cached.conn) return cached.conn;
     if (!cached.promise) {
         const opts = {
             bufferCommands: false,
@@ -100,7 +86,6 @@ async function connectDB() {
         const mongoUri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/makeup_store';
         cached.promise = mongoose.connect(mongoUri, opts).then((m) => m);
     }
-
     try {
         cached.conn = await cached.promise;
     } catch (e) {
@@ -110,7 +95,6 @@ async function connectDB() {
     return cached.conn;
 }
 
-// 🟢 ميديولوير الاتصال الخاطف بالسيرفر قبل تنفيذ الروابط
 app.use(async (req, res, next) => {
     try {
         await connectDB();
@@ -121,7 +105,7 @@ app.use(async (req, res, next) => {
     }
 });
 
-// ================= الـ Schemas والموديلات (Models) =================
+// ================= Models =================
 
 const userSchema = new mongoose.Schema({
     name: { type: String, required: true },
@@ -145,10 +129,8 @@ const clothingSchema = new mongoose.Schema({
     salePrice: { type: Number },
     saleEnds: { type: Date }, 
     description: { type: String },
-
     category: { type: String, required: true, trim: true, index: true },
     subcategory: { type: String, trim: true, default: null, index: true },
-
     variantGroups: [{
         title: { type: String },
         options: [{
@@ -156,15 +138,10 @@ const clothingSchema = new mongoose.Schema({
             image: { type: String, default: null }
         }]
     }],
-
     variantCategory: { type: String, default: 'الدرجات المتاحة' }, 
-    variants: [{ 
-        name: { type: String }, 
-        image: { type: String } 
-    }], 
+    variants: [{ name: { type: String }, image: { type: String } }], 
     createdAt: { type: Date, default: Date.now, index: true }
 });
-
 const Clothing = mongoose.model('Clothing', clothingSchema);
 
 const favoriteSchema = new mongoose.Schema({
@@ -206,7 +183,6 @@ const orderSchema = new mongoose.Schema({
     }],
     createdAt: { type: Date, default: Date.now }
 }, { strict: false });
-
 const Order = mongoose.model('Order', orderSchema);
 
 const bookingSchema = new mongoose.Schema({
@@ -216,15 +192,12 @@ const bookingSchema = new mongoose.Schema({
     selectedVariant: { type: String },
     selectedVariantImage: { type: String },
     status: { type: String, default: 'قيد الانتظار' }, 
-    product: { 
-        type: mongoose.Schema.Types.Mixed,
-        ref: 'Clothing' 
-    },
+    product: { type: mongoose.Schema.Types.Mixed, ref: 'Clothing' },
     createdAt: { type: Date, default: Date.now }
 });
 const Booking = mongoose.model('Booking', bookingSchema);
 
-// ================= دوال مساعدة =================
+// ================= Helper Functions =================
 
 function fetchGoogleUserInfo(accessToken) {
     return new Promise((resolve, reject) => {
@@ -232,23 +205,16 @@ function fetchGoogleUserInfo(accessToken) {
             hostname: 'www.googleapis.com',
             path: '/oauth2/v3/userinfo',
             method: 'GET',
-            headers: {
-                'Authorization': `Bearer ${accessToken}`
-            }
+            headers: { 'Authorization': `Bearer ${accessToken}` }
         };
-
         const req = https.request(options, (res) => {
             let data = '';
             res.on('data', (chunk) => data += chunk);
             res.on('end', () => {
-                if (res.statusCode === 200) {
-                    resolve(JSON.parse(data));
-                } else {
-                    reject(new Error(`Google API status ${res.statusCode}`));
-                }
+                if (res.statusCode === 200) resolve(JSON.parse(data));
+                else reject(new Error(`Google API status ${res.statusCode}`));
             });
         });
-
         req.on('error', (err) => reject(err));
         req.end();
     });
@@ -269,18 +235,65 @@ const safeDeleteImage = async (imageUrl) => {
     }
 };
 
-// ================= الـ API Routes =================
+// دالة مساعدة لتعبئة بيانات الطلبات بالصور من قاعدة البيانات
+async function populateOrdersWithImages(orders) {
+    const productIds = [];
+    orders.forEach(order => {
+        if (order.items) {
+            order.items.forEach(item => {
+                if (item.productId && mongoose.Types.ObjectId.isValid(item.productId)) {
+                    productIds.push(item.productId);
+                }
+            });
+        }
+    });
+
+    const products = await Clothing.find({ _id: { $in: productIds } }).lean();
+    const productMap = new Map(products.map(p => [p._id.toString(), p]));
+
+    return orders.map(order => {
+        if (order.items && order.items.length > 0) {
+            order.items.forEach(item => {
+                if (item.productId && productMap.has(item.productId.toString())) {
+                    const product = productMap.get(item.productId.toString());
+                    if (!item.image && !item.selectedVariantImage) {
+                        item.image = product.mainImage;
+                    }
+                    if (item.selectedVariant && !item.selectedVariantImage) {
+                        if (product.variants) {
+                            const foundVar = product.variants.find(v => v.name === item.selectedVariant);
+                            if (foundVar && foundVar.image) item.selectedVariantImage = foundVar.image;
+                        }
+                        if (!item.selectedVariantImage && product.variantGroups) {
+                            for (let group of product.variantGroups) {
+                                if (group.options) {
+                                    const foundOpt = group.options.find(o => o.name === item.selectedVariant);
+                                    if (foundOpt && foundOpt.image) {
+                                        item.selectedVariantImage = foundOpt.image;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        return order;
+    });
+}
+
+// ================= API Routes =================
 
 app.get('/', (req, res) => {
     res.json({ message: "Makeup Studio API is running super fast on Vercel 🚀" });
 });
 
-// ---------------- 🔴 روابط التسجيل ودخول جوجل ----------------
+// ---------------- Auth ----------------
 
 app.post('/api/auth/google', async (req, res) => {
     try {
         const { idToken, accessToken } = req.body;
-
         if (!idToken && !accessToken) {
             return res.status(400).json({ message: "يلزم توفير idToken أو accessToken" });
         }
@@ -298,7 +311,7 @@ app.post('/api/auth/google', async (req, res) => {
                 name = payload.name;
                 googleId = payload.sub;
             } catch (idTokenError) {
-                console.warn("تعذر التحقق بواسطة idToken، الانتهاج للـ accessToken:", idTokenError.message);
+                console.warn("تعذر التحقق بواسطة idToken:", idTokenError.message);
             }
         }
 
@@ -309,95 +322,28 @@ app.post('/api/auth/google', async (req, res) => {
             googleId = googleProfile.sub;
         }
 
-        if (!email) {
-            return res.status(401).json({ message: "فشل التحقق من توكن جوجل" });
-        }
+        if (!email) return res.status(401).json({ message: "فشل التحقق من توكن جوجل" });
 
         let user = await User.findOne({ email });
-
         if (!user) {
             const hashedPassword = await bcrypt.hash(`google_oauth_${googleId}`, 10);
-            user = new User({
-                name: name || 'مستخدم جوجل',
-                email: email,
-                password: hashedPassword,
-                role: 'user'
-            });
+            user = new User({ name: name || 'مستخدم جوجل', email, password: hashedPassword, role: 'user' });
             await user.save();
         }
 
         const token = jwt.sign({ userId: user._id, role: user.role }, JWT_SECRET, { expiresIn: '30d' });
-
         res.status(200).json({
             message: "تم تسجيل الدخول بجوجل بنجاح 🎉",
-            token,
-            userId: user._id,
-            name: user.name,
-            email: user.email,
-            user: {
-                id: user._id,
-                name: user.name,
-                email: user.email
-            }
+            token, userId: user._id, name: user.name, email: user.email,
+            user: { id: user._id, name: user.name, email: user.email }
         });
-
     } catch (error) {
         console.error("خطأ تسجيل الدخول بجوجل:", error);
         res.status(401).json({ message: "فشل التحقق من توكن جوجل" });
     }
 });
 
-// ---------------- 🔴 روابط إدارة المفضلة (Favorites) ----------------
-
-app.get('/api/favorites/:userId', async (req, res) => {
-    try {
-        const { userId } = req.params;
-        const favorites = await Favorite.find({ userId }).populate('productId').lean();
-        const items = favorites
-            .filter(f => f.productId != null)
-            .map(f => f.productId);
-
-        res.json(items);
-    } catch (error) {
-        console.error("خطأ جلب المفضلة:", error);
-        res.status(500).json({ message: "حدث خطأ أثناء جلب المفضلة" });
-    }
-});
-
-app.post('/api/favorites/add', async (req, res) => {
-    try {
-        const { userId, productId } = req.body;
-        if (!userId || !productId) {
-            return res.status(400).json({ message: "userId و productId مطلوبان" });
-        }
-
-        const newFav = new Favorite({ userId, productId });
-        await newFav.save();
-        res.status(201).json({ message: "تمت إضافة المنتج للمفضلة بنجاح ❤️" });
-    } catch (error) {
-        if (error.code === 11000) {
-            return res.status(400).json({ message: "المنتج موجود بالفعل في المفضلة" });
-        }
-        res.status(500).json({ message: "حدث خطأ أثناء إضافة المنتج للمفضلة" });
-    }
-});
-
-app.post('/api/favorites/remove', async (req, res) => {
-    try {
-        const { userId, productId } = req.body;
-        if (!userId || !productId) {
-            return res.status(400).json({ message: "userId و productId مطلوبان" });
-        }
-
-        await Favorite.findOneAndDelete({ userId, productId });
-        res.json({ message: "تمت إزالة المنتج من المفضلة بنجاح ✔️" });
-    } catch (error) {
-        res.status(500).json({ message: "حدث خطأ أثناء إزالة المنتج من المفضلة" });
-    }
-});
-
-// ---------------- روابط نظام الحسابات والـ Auth ----------------
-
+// ✅ register يرجع token و userId فوراً
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { name, email, password } = req.body;
@@ -411,9 +357,19 @@ app.post('/api/auth/register', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const newUser = new User({ name, email, password: hashedPassword });
         await newUser.save();
-        
-        res.status(201).json({ message: "تم إنشاء الحساب بنجاح!" });
+
+        // ✅ بنرجع token و userId مباشرة بدون الحاجة لـ login ثاني
+        const token = jwt.sign({ userId: newUser._id, role: newUser.role }, JWT_SECRET, { expiresIn: '30d' });
+
+        res.status(201).json({
+            message: "تم إنشاء الحساب بنجاح!",
+            token,
+            userId: newUser._id,
+            name: newUser.name,
+            email: newUser.email
+        });
     } catch (error) {
+        console.error("خطأ إنشاء الحساب:", error);
         res.status(500).json({ message: "فشل إنشاء الحساب" });
     }
 });
@@ -422,51 +378,46 @@ app.post('/api/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
         const user = await User.findOne({ email });
-
-        if (!user) {
-            return res.status(401).json({ message: "البريد الإلكتروني أو كلمة المرور غير صحيحة" });
-        }
+        if (!user) return res.status(401).json({ message: "البريد الإلكتروني أو كلمة المرور غير صحيحة" });
 
         const isMatch = await bcrypt.compare(password, user.password);
-        if (!isMatch) {
-            return res.status(401).json({ message: "البريد الإلكتروني أو كلمة المرور غير صحيحة" });
-        }
+        if (!isMatch) return res.status(401).json({ message: "البريد الإلكتروني أو كلمة المرور غير صحيحة" });
 
         const token = jwt.sign({ userId: user._id, role: user.role }, JWT_SECRET, { expiresIn: '30d' });
-
-        res.json({
-            message: "تم تسجيل الدخول بنجاح",
-            token, 
-            userId: user._id,
-            name: user.name,
-            email: user.email
-        });
+        res.json({ message: "تم تسجيل الدخول بنجاح", token, userId: user._id, name: user.name, email: user.email });
     } catch (error) {
         res.status(500).json({ message: "حدث خطأ في الخادم أثناء تسجيل الدخول" });
     }
 });
 
-app.get('/api/users/:id', async (req, res) => {
+// ---------------- Users ----------------
+
+// ⚠️ مهم: الـ routes الثابتة لازم تيجي قبل routes الـ :id
+app.get('/api/users/check-admin/:id', async (req, res) => {
     try {
         const userId = req.params.id;
-        if (!mongoose.Types.ObjectId.isValid(userId)) {
-            return res.status(404).json({ message: "المستخدم غير موجود" });
+        if (userId === '64b0f1a2c3d4e5f6a7b8c9d0' || userId === 'developer_admin_id') return res.json({ isAdmin: true });
+        if (!mongoose.Types.ObjectId.isValid(userId)) return res.json({ isAdmin: false });
+
+        const user = await User.findById(userId).lean();
+        if (user) {
+            if (user.email === 'makeupstudio@gmail.com' || user.role === 'admin') return res.json({ isAdmin: true });
+            const isAdminEmail = await Admin.findOne({ email: user.email }).lean();
+            if (isAdminEmail) return res.json({ isAdmin: true });
         }
-        const user = await User.findById(userId).select('-password').lean(); 
-        if (!user) return res.status(404).json({ message: "المستخدم غير موجود" });
-        res.json(user);
+        const adminById = await Admin.findById(userId).lean();
+        if (adminById) return res.json({ isAdmin: true });
+
+        res.json({ isAdmin: false });
     } catch (error) {
-        res.status(500).json({ message: "حدث خطأ في الخادم أثناء جلب البيانات" });
+        res.json({ isAdmin: false }); 
     }
 });
 
 app.put('/api/users/update-profile', async (req, res) => {
     try {
         const { userId, name, email } = req.body;
-
-        if (!userId || !name) {
-            return res.status(400).json({ message: "userId و name مطلوبان" });
-        }
+        if (!userId || !name) return res.status(400).json({ message: "userId و name مطلوبان" });
 
         const trimmedName = name.trim();
 
@@ -477,46 +428,99 @@ app.put('/api/users/update-profile', async (req, res) => {
                     { name: trimmedName },
                     { new: true }
                 ).select('-password');
-
                 if (updatedUserByEmail) {
-                    return res.status(200).json({
-                        message: "تم حفظ التعديلات بنجاح ✔️",
-                        user: updatedUserByEmail
-                    });
+                    return res.status(200).json({ message: "تم حفظ التعديلات بنجاح ✔️", user: updatedUserByEmail });
                 }
             }
-
             return res.status(200).json({
                 message: "تم حفظ التعديلات بنجاح ✔️",
-                user: {
-                    _id: userId,
-                    name: trimmedName,
-                    email: email || "makeupstudio@gmail.com"
-                }
+                user: { _id: userId, name: trimmedName, email: email || "makeupstudio@gmail.com" }
             });
         }
 
-        const updatedUser = await User.findByIdAndUpdate(
-            userId,
-            { name: trimmedName },
-            { new: true }
-        ).select('-password');
+        const updatedUser = await User.findByIdAndUpdate(userId, { name: trimmedName }, { new: true }).select('-password');
+        if (!updatedUser) return res.status(404).json({ message: "المستخدم غير موجود" });
 
-        if (!updatedUser) {
-            return res.status(404).json({ message: "المستخدم غير موجود" });
-        }
-
-        return res.status(200).json({
-            message: "تم حفظ التعديلات بنجاح ✔️",
-            user: updatedUser
-        });
+        return res.status(200).json({ message: "تم حفظ التعديلات بنجاح ✔️", user: updatedUser });
     } catch (error) {
         console.error("خطأ تحديث الملف الشخصي:", error);
         return res.status(500).json({ message: "حدث خطأ أثناء تحديث البيانات" });
     }
 });
 
-// ---------------- 🟢 روابط الأقسام والمنتجات والصور ----------------
+app.post('/api/users/add-admin', async (req, res) => {
+    try {
+        const newAdmin = new Admin(req.body);
+        const savedAdmin = await newAdmin.save();
+        res.status(201).json({ message: "تم إضافة الأدمن بنجاح! 👑", admin: savedAdmin });
+    } catch (error) {
+        res.status(400).json({ message: "فشل إضافة الأدمن", error: error.message });
+    }
+});
+
+app.get('/api/users/:id', async (req, res) => {
+    try {
+        const userId = req.params.id;
+        if (!mongoose.Types.ObjectId.isValid(userId)) return res.status(404).json({ message: "المستخدم غير موجود" });
+        const user = await User.findById(userId).select('-password').lean(); 
+        if (!user) return res.status(404).json({ message: "المستخدم غير موجود" });
+        res.json(user);
+    } catch (error) {
+        res.status(500).json({ message: "حدث خطأ في الخادم أثناء جلب البيانات" });
+    }
+});
+
+app.delete('/api/users/:id', async (req, res) => {
+    try {
+        const userId = req.params.id;
+        if (!mongoose.Types.ObjectId.isValid(userId)) return res.status(400).json({ message: "معرف غير صالح" });
+        const deletedUser = await User.findByIdAndDelete(userId);
+        if (!deletedUser) return res.status(404).json({ message: "المستند غير موجود بالفعل" });
+        res.json({ message: "تم حذف حساب المستخدم بنجاح" });
+    } catch (error) {
+        res.status(500).json({ message: "فشل حذف الحساب" });
+    }
+});
+
+// ---------------- Favorites ----------------
+
+app.get('/api/favorites/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const favorites = await Favorite.find({ userId }).populate('productId').lean();
+        const items = favorites.filter(f => f.productId != null).map(f => f.productId);
+        res.json(items);
+    } catch (error) {
+        console.error("خطأ جلب المفضلة:", error);
+        res.status(500).json({ message: "حدث خطأ أثناء جلب المفضلة" });
+    }
+});
+
+app.post('/api/favorites/add', async (req, res) => {
+    try {
+        const { userId, productId } = req.body;
+        if (!userId || !productId) return res.status(400).json({ message: "userId و productId مطلوبان" });
+        const newFav = new Favorite({ userId, productId });
+        await newFav.save();
+        res.status(201).json({ message: "تمت إضافة المنتج للمفضلة بنجاح ❤️" });
+    } catch (error) {
+        if (error.code === 11000) return res.status(400).json({ message: "المنتج موجود بالفعل في المفضلة" });
+        res.status(500).json({ message: "حدث خطأ أثناء إضافة المنتج للمفضلة" });
+    }
+});
+
+app.post('/api/favorites/remove', async (req, res) => {
+    try {
+        const { userId, productId } = req.body;
+        if (!userId || !productId) return res.status(400).json({ message: "userId و productId مطلوبان" });
+        await Favorite.findOneAndDelete({ userId, productId });
+        res.json({ message: "تمت إزالة المنتج من المفضلة بنجاح ✔️" });
+    } catch (error) {
+        res.status(500).json({ message: "حدث خطأ أثناء إزالة المنتج من المفضلة" });
+    }
+});
+
+// ---------------- Upload ----------------
 
 app.post('/api/upload', (req, res, next) => {
     upload.any()(req, res, (err) => {
@@ -529,17 +533,14 @@ app.post('/api/upload', (req, res, next) => {
 }, async (req, res) => {
     try {
         let file = (req.files && req.files.length > 0) ? req.files[0] : req.file;
-
         if (file) {
             const imageUrl = await processUploadedFile(file);
-            return res.status(200).json({ imageUrl: imageUrl, url: imageUrl });
+            return res.status(200).json({ imageUrl, url: imageUrl });
         }
-        
         const rawImage = req.body.image || req.body.mainImage || req.body.file || req.body.photo;
         if (rawImage && typeof rawImage === 'string') {
             return res.status(200).json({ imageUrl: rawImage, url: rawImage });
         }
-
         return res.status(400).json({ message: 'لم يتم استلام أي صورة' });
     } catch (error) {
         console.error("خطأ رفع الصورة:", error);
@@ -547,11 +548,11 @@ app.post('/api/upload', (req, res, next) => {
     }
 });
 
+// ---------------- Categories ----------------
+
 app.get('/api/categories', async (req, res) => {
     try {
-        // ⚡ إضافة كاش ذكي للـ Edge Server لتسريع تحميل الأقسام
         res.setHeader('Cache-Control', 's-maxage=1, stale-while-revalidate=59');
-
         const [customCategories, productCategories] = await Promise.all([
             Category.distinct('name'),
             Clothing.distinct('category')
@@ -592,11 +593,11 @@ app.delete('/api/categories/:idOrName', async (req, res) => {
     }
 });
 
+// ---------------- Clothes ----------------
+
 app.get('/api/clothes', async (req, res) => {
     try {
-        // ⚡ سرعة فائقة مع كاش Vercel المباشر
         res.setHeader('Cache-Control', 's-maxage=1, stale-while-revalidate=59');
-
         const { category, subcategory } = req.query;
         let query = {};
         if (category) query.category = category;
@@ -616,15 +617,11 @@ app.post('/api/clothes', (req, res, next) => {
 }, async (req, res) => {
     try {
         let productData = req.body;
-
         if (typeof req.body.data === 'string') {
             try { productData = JSON.parse(req.body.data); } catch (e) {}
         }
-
         let file = (req.files && req.files.length > 0) ? req.files[0] : req.file;
-        if (file) {
-            productData.mainImage = await processUploadedFile(file);
-        }
+        if (file) productData.mainImage = await processUploadedFile(file);
 
         if (!productData.title || !productData.category || productData.originalPrice == null) {
             return res.status(400).json({ message: "العنوان، القسم، والسعر الأصلي حقول مطلوبة" });
@@ -647,26 +644,16 @@ app.put('/api/clothes/:id', (req, res, next) => {
 }, async (req, res) => {
     try {
         const { id } = req.params;
-        if (!mongoose.Types.ObjectId.isValid(id)) {
-            return res.status(400).json({ message: "معرف غير صالح" });
-        }
+        if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: "معرف غير صالح" });
 
         let updateData = req.body;
         if (typeof req.body.data === 'string') {
             try { updateData = JSON.parse(req.body.data); } catch (e) {}
         }
-
         let file = (req.files && req.files.length > 0) ? req.files[0] : req.file;
-        if (file) {
-            updateData.mainImage = await processUploadedFile(file);
-        }
+        if (file) updateData.mainImage = await processUploadedFile(file);
 
-        const updatedCloth = await Clothing.findByIdAndUpdate(
-            id,
-            { $set: updateData },
-            { new: true, runValidators: true }
-        );
-
+        const updatedCloth = await Clothing.findByIdAndUpdate(id, { $set: updateData }, { new: true, runValidators: true });
         if (!updatedCloth) return res.status(404).json({ message: "المنتج غير موجود" });
         res.json({ message: "تم تحديث المنتج بنجاح! ✨", item: updatedCloth });
     } catch (error) {
@@ -694,40 +681,7 @@ app.delete('/api/clothes/:id', async (req, res) => {
     }
 });
 
-// ---------------- رابط التحقق من الأدمن ----------------
-
-app.get('/api/users/check-admin/:id', async (req, res) => {
-    try {
-        const userId = req.params.id;
-        if (userId === '64b0f1a2c3d4e5f6a7b8c9d0' || userId === 'developer_admin_id') return res.json({ isAdmin: true });
-        if (!mongoose.Types.ObjectId.isValid(userId)) return res.json({ isAdmin: false });
-
-        const user = await User.findById(userId).lean();
-        if (user) {
-            if (user.email === 'makeupstudio@gmail.com' || user.role === 'admin') return res.json({ isAdmin: true });
-            const isAdminEmail = await Admin.findOne({ email: user.email }).lean();
-            if (isAdminEmail) return res.json({ isAdmin: true });
-        }
-        const adminById = await Admin.findById(userId).lean();
-        if (adminById) return res.json({ isAdmin: true });
-
-        res.json({ isAdmin: false });
-    } catch (error) {
-        res.json({ isAdmin: false }); 
-    }
-});
-
-app.post('/api/users/add-admin', async (req, res) => {
-    try {
-        const newAdmin = new Admin(req.body);
-        const savedAdmin = await newAdmin.save();
-        res.status(201).json({ message: "تم إضافة الأدمن بنجاح! 👑", admin: savedAdmin });
-    } catch (error) {
-        res.status(400).json({ message: "فشل إضافة الأدمن", error: error.message });
-    }
-});
-
-// ---------------- روابط إدارة الطلبات (Orders) ----------------
+// ---------------- Orders ----------------
 
 app.post('/api/orders', async (req, res) => {
     try {
@@ -739,57 +693,26 @@ app.post('/api/orders', async (req, res) => {
     }
 });
 
+// ✅ جلب طلبات مستخدم معين (لازم يكون قبل /api/orders/:id)
+app.get('/api/orders/user/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        if (!userId) return res.status(400).json({ message: "userId مطلوب" });
+
+        const orders = await Order.find({ userId: userId }).sort({ createdAt: -1 }).lean();
+        const populatedOrders = await populateOrdersWithImages(orders);
+        res.json(populatedOrders);
+    } catch (error) {
+        console.error("خطأ جلب طلبات المستخدم:", error);
+        res.status(500).json({ message: "حدث خطأ أثناء جلب الطلبات" });
+    }
+});
+
+// جلب كل الطلبات (للأدمن)
 app.get('/api/orders', async (req, res) => {
     try {
         const orders = await Order.find().sort({ createdAt: -1 }).lean();
-
-        const productIds = [];
-        orders.forEach(order => {
-            if (order.items) {
-                order.items.forEach(item => {
-                    if (item.productId && mongoose.Types.ObjectId.isValid(item.productId)) {
-                        productIds.push(item.productId);
-                    }
-                });
-            }
-        });
-
-        const products = await Clothing.find({ _id: { $in: productIds } }).lean();
-        const productMap = new Map(products.map(p => [p._id.toString(), p]));
-
-        const populatedOrders = orders.map(order => {
-            if (order.items && order.items.length > 0) {
-                order.items.forEach(item => {
-                    if (item.productId && productMap.has(item.productId.toString())) {
-                        const product = productMap.get(item.productId.toString());
-                        
-                        if (!item.image && !item.selectedVariantImage) {
-                            item.image = product.mainImage;
-                        }
-                        
-                        if (item.selectedVariant && !item.selectedVariantImage) {
-                            if (product.variants) {
-                                const foundVar = product.variants.find(v => v.name === item.selectedVariant);
-                                if (foundVar && foundVar.image) item.selectedVariantImage = foundVar.image;
-                            }
-                            if (!item.selectedVariantImage && product.variantGroups) {
-                                for (let group of product.variantGroups) {
-                                    if (group.options) {
-                                        const foundOpt = group.options.find(o => o.name === item.selectedVariant);
-                                        if (foundOpt && foundOpt.image) {
-                                            item.selectedVariantImage = foundOpt.image;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-            return order;
-        });
-
+        const populatedOrders = await populateOrdersWithImages(orders);
         res.json(populatedOrders);
     } catch (error) {
         console.error("خطأ جلب الطلبات:", error);
@@ -802,11 +725,7 @@ app.put('/api/orders/:id', async (req, res) => {
         const { id } = req.params;
         if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: "معرف غير صالح" });
 
-        const updatedOrder = await Order.findByIdAndUpdate(
-            id, 
-            { status: req.body.status }, 
-            { new: true }
-        );
+        const updatedOrder = await Order.findByIdAndUpdate(id, { status: req.body.status }, { new: true });
         if (!updatedOrder) return res.status(404).json({ message: "الطلب غير موجود" });
 
         res.json({ message: "تم تحديث حالة الطلب بنجاح", order: updatedOrder });
@@ -829,7 +748,7 @@ app.delete('/api/orders/:id', async (req, res) => {
     }
 });
 
-// ---------------- روابط الحجوزات (Bookings) ----------------
+// ---------------- Bookings ----------------
 
 app.post('/api/bookings', async (req, res) => {
     try {
@@ -844,21 +763,15 @@ app.post('/api/bookings', async (req, res) => {
 app.get('/api/bookings', async (req, res) => {
     try {
         const bookings = await Booking.find().sort({ createdAt: -1 }).lean();
-
-        const productIds = bookings
-            .map(b => b.product)
-            .filter(id => id && mongoose.Types.ObjectId.isValid(id));
-
+        const productIds = bookings.map(b => b.product).filter(id => id && mongoose.Types.ObjectId.isValid(id));
         const products = await Clothing.find({ _id: { $in: productIds } }).lean();
         const productMap = new Map(products.map(p => [p._id.toString(), p]));
-
         const populatedBookings = bookings.map(b => {
             if (b.product && productMap.has(b.product.toString())) {
                 b.product = productMap.get(b.product.toString());
             }
             return b;
         });
-
         res.json(populatedBookings);
     } catch (error) {
         res.status(500).json({ message: "حدث خطأ أثناء جلب الحجوزات" });
@@ -870,11 +783,7 @@ app.put('/api/bookings/:id', async (req, res) => {
         const { id } = req.params;
         if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: "معرف غير صالح" });
 
-        const updatedBooking = await Booking.findByIdAndUpdate(
-            id,
-            { status: req.body.status },
-            { new: true }
-        );
+        const updatedBooking = await Booking.findByIdAndUpdate(id, { status: req.body.status }, { new: true });
         if (!updatedBooking) return res.status(404).json({ message: "الحجز غير موجود" });
 
         res.json({ message: "تم تحديث حالة الحجز بنجاح", order: updatedBooking });
@@ -897,20 +806,7 @@ app.delete('/api/bookings/:id', async (req, res) => {
     }
 });
 
-// ---------------- حذف حساب مستخدم ----------------
-app.delete('/api/users/:id', async (req, res) => {
-    try {
-        const userId = req.params.id;
-        if (!mongoose.Types.ObjectId.isValid(userId)) return res.status(400).json({ message: "معرف غير صالح" });
-
-        const deletedUser = await User.findByIdAndDelete(userId);
-        if (!deletedUser) return res.status(404).json({ message: "المستند غير موجود بالفعل" });
-
-        res.json({ message: "تم حذف حساب المستخدم بنجاح" });
-    } catch (error) {
-        res.status(500).json({ message: "فشل حذف الحساب" });
-    }
-});
+// ================= Start Server =================
 
 if (process.env.NODE_ENV !== 'production') {
     app.listen(PORT, () => {
