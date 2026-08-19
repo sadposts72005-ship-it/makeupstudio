@@ -17,6 +17,10 @@ app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_change_in_production';
 
+// 🔒 بيانات الأدمن الحصرية والمحمية بالسيرفر
+const ADMIN_EMAIL = 'makeupstudio@gmail.com';
+const ADMIN_PASSWORD = 'studioMIX20@#';
+
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '661574967799-jrv9c3s98t3u5g19nrdcatd80qrmovib.apps.googleusercontent.com';
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
@@ -185,9 +189,8 @@ const orderSchema = new mongoose.Schema({
 }, { strict: false });
 const Order = mongoose.model('Order', orderSchema);
 
-// ✅ bookingSchema مع userId
 const bookingSchema = new mongoose.Schema({
-    userId: { type: String, default: null }, // ✅ ربط الحجز بالمستخدم
+    userId: { type: String, default: null },
     name: { type: String, required: true },
     phone: { type: String, required: true },
     extraPhone: { type: String, default: null },
@@ -295,6 +298,7 @@ app.get('/', (req, res) => {
 
 // ---------------- Auth ----------------
 
+// 🟢 1. حماية تسجيل الدخول بحساب Google (منع انتحال إيميل الأدمن)
 app.post('/api/auth/google', async (req, res) => {
     try {
         const { idToken, accessToken } = req.body;
@@ -328,10 +332,17 @@ app.post('/api/auth/google', async (req, res) => {
 
         if (!email) return res.status(401).json({ message: "فشل التحقق من توكن جوجل" });
 
-        let user = await User.findOne({ email });
+        const cleanEmail = email.trim().toLowerCase();
+
+        // ⛔ منع الدخول بجوجل إذا كان الإيميل هو إيميل الأدمن المحمي
+        if (cleanEmail === ADMIN_EMAIL) {
+            return res.status(403).json({ message: "هذا البريد مخصص لإدارة النظام فقط ولا يمكن التسجيل به عبر جوجل" });
+        }
+
+        let user = await User.findOne({ email: cleanEmail });
         if (!user) {
             const hashedPassword = await bcrypt.hash(`google_oauth_${googleId}`, 10);
-            user = new User({ name: name || 'مستخدم جوجل', email, password: hashedPassword, role: 'user' });
+            user = new User({ name: name || 'مستخدم جوجل', email: cleanEmail, password: hashedPassword, role: 'user' });
             await user.save();
         }
 
@@ -347,6 +358,7 @@ app.post('/api/auth/google', async (req, res) => {
     }
 });
 
+// 🟢 2. حماية إنشاء الحساب (حظر إيميل الأدمن أو أي صيغة مشابهة)
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { name, email, password } = req.body;
@@ -354,11 +366,18 @@ app.post('/api/auth/register', async (req, res) => {
             return res.status(400).json({ message: "جميع الحقول مطلوبة" });
         }
 
-        const exactUser = await User.findOne({ email });
+        const cleanEmail = email.trim().toLowerCase();
+
+        // ⛔ حظر التسجيل بإيميل الأدمن أو بأي صيغة مماثلة
+        if (cleanEmail === ADMIN_EMAIL || cleanEmail.replace(/\s+/g, '') === ADMIN_EMAIL) {
+            return res.status(400).json({ message: "خطأ في البريد الإلكتروني، يرجى كتابة بريد آخر للتسجيل" });
+        }
+
+        const exactUser = await User.findOne({ email: cleanEmail });
         if (exactUser) return res.status(400).json({ message: "هذا الحساب مسجل بالفعل" });
 
         const hashedPassword = await bcrypt.hash(password, 10);
-        const newUser = new User({ name, email, password: hashedPassword });
+        const newUser = new User({ name: name.trim(), email: cleanEmail, password: hashedPassword, role: 'user' });
         await newUser.save();
 
         const token = jwt.sign({ userId: newUser._id, role: newUser.role }, JWT_SECRET, { expiresIn: '30d' });
@@ -376,17 +395,42 @@ app.post('/api/auth/register', async (req, res) => {
     }
 });
 
+// 🟢 3. تسجيل الدخول مع الحماية الحصرية للأدمن
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
-        const user = await User.findOne({ email });
+        if (!email || !password) {
+            return res.status(400).json({ message: "يرجى ملء جميع الحقول" });
+        }
+
+        const cleanEmail = email.trim().toLowerCase();
+
+        // 👑 إذا كان الإيميل هو إيميل الأدمن الحصري
+        if (cleanEmail === ADMIN_EMAIL) {
+            if (password === ADMIN_PASSWORD) {
+                const token = jwt.sign({ userId: 'developer_admin_id', role: 'admin' }, JWT_SECRET, { expiresIn: '30d' });
+                return res.json({
+                    message: "تم تسجيل دخول المدير بنجاح 👑",
+                    token,
+                    userId: 'developer_admin_id',
+                    name: 'المدير',
+                    email: ADMIN_EMAIL,
+                    isAdmin: true
+                });
+            } else {
+                return res.status(401).json({ message: "البريد الإلكتروني أو كلمة المرور غير صحيحة" });
+            }
+        }
+
+        // 👤 للمستخدمين العاديين
+        const user = await User.findOne({ email: cleanEmail });
         if (!user) return res.status(401).json({ message: "البريد الإلكتروني أو كلمة المرور غير صحيحة" });
 
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) return res.status(401).json({ message: "البريد الإلكتروني أو كلمة المرور غير صحيحة" });
 
         const token = jwt.sign({ userId: user._id, role: user.role }, JWT_SECRET, { expiresIn: '30d' });
-        res.json({ message: "تم تسجيل الدخول بنجاح", token, userId: user._id, name: user.name, email: user.email });
+        res.json({ message: "تم تسجيل الدخول بنجاح", token, userId: user._id, name: user.name, email: user.email, isAdmin: false });
     } catch (error) {
         res.status(500).json({ message: "حدث خطأ في الخادم أثناء تسجيل الدخول" });
     }
@@ -394,21 +438,22 @@ app.post('/api/auth/login', async (req, res) => {
 
 // ---------------- Users ----------------
 
-// ⚠️ Routes الثابتة قبل :id
+// 🟢 4. فحص الأدمن الصارم (مقفول تماماً على إيميل الأدمن المعتمد)
 app.get('/api/users/check-admin/:id', async (req, res) => {
     try {
         const userId = req.params.id;
-        if (userId === '64b0f1a2c3d4e5f6a7b8c9d0' || userId === 'developer_admin_id') return res.json({ isAdmin: true });
-        if (!mongoose.Types.ObjectId.isValid(userId)) return res.json({ isAdmin: false });
+        if (userId === 'developer_admin_id' || userId === '64b0f1a2c3d4e5f6a7b8c9d0') {
+            return res.json({ isAdmin: true });
+        }
+
+        if (!mongoose.Types.ObjectId.isValid(userId)) {
+            return res.json({ isAdmin: false });
+        }
 
         const user = await User.findById(userId).lean();
-        if (user) {
-            if (user.email === 'makeupstudio@gmail.com' || user.role === 'admin') return res.json({ isAdmin: true });
-            const isAdminEmail = await Admin.findOne({ email: user.email }).lean();
-            if (isAdminEmail) return res.json({ isAdmin: true });
+        if (user && user.email.toLowerCase() === ADMIN_EMAIL) {
+            return res.json({ isAdmin: true });
         }
-        const adminById = await Admin.findById(userId).lean();
-        if (adminById) return res.json({ isAdmin: true });
 
         res.json({ isAdmin: false });
     } catch (error) {
@@ -424,19 +469,9 @@ app.put('/api/users/update-profile', async (req, res) => {
         const trimmedName = name.trim();
 
         if (!mongoose.Types.ObjectId.isValid(userId)) {
-            if (email) {
-                const updatedUserByEmail = await User.findOneAndUpdate(
-                    { email: email.toLowerCase() },
-                    { name: trimmedName },
-                    { new: true }
-                ).select('-password');
-                if (updatedUserByEmail) {
-                    return res.status(200).json({ message: "تم حفظ التعديلات بنجاح ✔️", user: updatedUserByEmail });
-                }
-            }
             return res.status(200).json({
                 message: "تم حفظ التعديلات بنجاح ✔️",
-                user: { _id: userId, name: trimmedName, email: email || "makeupstudio@gmail.com" }
+                user: { _id: userId, name: trimmedName, email: email || ADMIN_EMAIL }
             });
         }
 
@@ -450,7 +485,6 @@ app.put('/api/users/update-profile', async (req, res) => {
     }
 });
 
-// ✅ المستخدم يغير باسورده بنفسه
 app.put('/api/users/change-password', async (req, res) => {
     try {
         const { userId, oldPassword, newPassword } = req.body;
@@ -478,7 +512,6 @@ app.put('/api/users/change-password', async (req, res) => {
     }
 });
 
-// ✅ الأدمن يعمل reset لباسورد أي مستخدم
 app.put('/api/admin/reset-password', async (req, res) => {
     try {
         const { email, newPassword } = req.body;
@@ -499,26 +532,15 @@ app.put('/api/admin/reset-password', async (req, res) => {
     }
 });
 
-// ✅ جلب كل المستخدمين للأدمن
 app.get('/api/admin/users', async (req, res) => {
     try {
-        const users = await User.find()
+        const users = await User.find({ email: { $ne: ADMIN_EMAIL } })
             .select('name email role createdAt')
             .sort({ createdAt: -1 })
             .lean();
         res.json({ total: users.length, users });
     } catch (error) {
         res.status(500).json({ message: "خطأ في جلب المستخدمين" });
-    }
-});
-
-app.post('/api/users/add-admin', async (req, res) => {
-    try {
-        const newAdmin = new Admin(req.body);
-        const savedAdmin = await newAdmin.save();
-        res.status(201).json({ message: "تم إضافة الأدمن بنجاح! 👑", admin: savedAdmin });
-    } catch (error) {
-        res.status(400).json({ message: "فشل إضافة الأدمن", error: error.message });
     }
 });
 
@@ -603,7 +625,7 @@ app.post('/api/upload', (req, res, next) => {
         }
         const rawImage = req.body.image || req.body.mainImage || req.body.file || req.body.photo;
         if (rawImage && typeof rawImage === 'string') {
-            return res.status(200).json({ imageUrl: rawImage, url: rawImage });
+            return res.status(200).json({ imageUrl, url: rawImage });
         }
         return res.status(400).json({ message: 'لم يتم استلام أي صورة' });
     } catch (error) {
@@ -757,7 +779,6 @@ app.post('/api/orders', async (req, res) => {
     }
 });
 
-// ✅ قبل /api/orders/:id
 app.get('/api/orders/user/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
@@ -823,7 +844,6 @@ app.post('/api/bookings', async (req, res) => {
     }
 });
 
-// ✅ قبل /api/bookings/:id
 app.get('/api/bookings/user/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
