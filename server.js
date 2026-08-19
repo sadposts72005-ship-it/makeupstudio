@@ -163,6 +163,7 @@ const adminSchema = new mongoose.Schema({
 });
 const Admin = mongoose.model('Admin', adminSchema);
 
+// 🟢 OrderSchema مع دعم الشحن والتتبع
 const orderSchema = new mongoose.Schema({
     userId: { type: String },
     userName: { type: String },
@@ -176,6 +177,8 @@ const orderSchema = new mongoose.Schema({
     total: { type: Number, required: true },
     grandTotal: { type: Number, required: true },
     status: { type: String, default: 'قيد الانتظار' }, 
+    trackingNumber: { type: String, default: null },
+    shippingProvider: { type: String, default: null },
     items: [{
         productId: { type: String },
         title: { type: String },
@@ -204,6 +207,14 @@ const bookingSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now }
 });
 const Booking = mongoose.model('Booking', bookingSchema);
+
+// 🟢 Model لحفظ إعدادات البيكسل والشحن والتطبيقات
+const settingsSchema = new mongoose.Schema({
+    type: { type: String, required: true, unique: true }, // 'pixels' | 'shipping'
+    data: { type: mongoose.Schema.Types.Mixed, default: {} },
+    updatedAt: { type: Date, default: Date.now }
+});
+const Settings = mongoose.model('Settings', settingsSchema);
 
 // ================= Helper Functions =================
 
@@ -298,7 +309,6 @@ app.get('/', (req, res) => {
 
 // ---------------- Auth ----------------
 
-// 🟢 1. حماية تسجيل الدخول بحساب Google (منع انتحال إيميل الأدمن)
 app.post('/api/auth/google', async (req, res) => {
     try {
         const { idToken, accessToken } = req.body;
@@ -358,7 +368,6 @@ app.post('/api/auth/google', async (req, res) => {
     }
 });
 
-// 🟢 2. حماية إنشاء الحساب (حظر إيميل الأدمن أو أي صيغة مشابهة)
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { name, email, password } = req.body;
@@ -395,7 +404,6 @@ app.post('/api/auth/register', async (req, res) => {
     }
 });
 
-// 🟢 3. تسجيل الدخول مع الحماية الحصرية للأدمن
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
@@ -438,7 +446,6 @@ app.post('/api/auth/login', async (req, res) => {
 
 // ---------------- Users ----------------
 
-// 🟢 4. فحص الأدمن الصارم (مقفول تماماً على إيميل الأدمن المعتمد)
 app.get('/api/users/check-admin/:id', async (req, res) => {
     try {
         const userId = req.params.id;
@@ -809,7 +816,7 @@ app.put('/api/orders/:id', async (req, res) => {
         const { id } = req.params;
         if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: "معرف غير صالح" });
 
-        const updatedOrder = await Order.findByIdAndUpdate(id, { status: req.body.status }, { new: true });
+        const updatedOrder = await Order.findByIdAndUpdate(id, { $set: req.body }, { new: true });
         if (!updatedOrder) return res.status(404).json({ message: "الطلب غير موجود" });
 
         res.json({ message: "تم تحديث حالة الطلب بنجاح", order: updatedOrder });
@@ -891,6 +898,120 @@ app.delete('/api/bookings/:id', async (req, res) => {
         res.json({ message: "تم حذف الحجز بنجاح 🗑️" });
     } catch (error) {
         res.status(500).json({ message: "حدث خطأ أثناء حذف الحجز" });
+    }
+});
+
+// ---------------- 🟢 Settings & Pixels & Shipping Integrations ----------------
+
+// 1. جلب وحفظ إعدادات البيكسل والتسويق
+app.get('/api/settings/pixels', async (req, res) => {
+    try {
+        const doc = await Settings.findOne({ type: 'pixels' }).lean();
+        res.json(doc ? doc.data : {});
+    } catch (e) {
+        res.status(500).json({ message: "خطأ في جلب إعدادات البيكسل" });
+    }
+});
+
+app.post('/api/settings/pixels', async (req, res) => {
+    try {
+        await Settings.findOneAndUpdate(
+            { type: 'pixels' },
+            { data: req.body, updatedAt: new Date() },
+            { upsert: true, new: true }
+        );
+        res.json({ message: "تم حفظ إعدادات البيكسل بنجاح" });
+    } catch (e) {
+        res.status(500).json({ message: "فشل حفظ الإعدادات" });
+    }
+});
+
+// 2. جلب وحفظ إعدادات شركات الشحن
+app.get('/api/settings/shipping', async (req, res) => {
+    try {
+        const doc = await Settings.findOne({ type: 'shipping' }).lean();
+        res.json(doc ? doc.data : {});
+    } catch (e) {
+        res.status(500).json({ message: "خطأ في جلب إعدادات الشحن" });
+    }
+});
+
+app.post('/api/settings/shipping', async (req, res) => {
+    try {
+        await Settings.findOneAndUpdate(
+            { type: 'shipping' },
+            { data: req.body, updatedAt: new Date() },
+            { upsert: true, new: true }
+        );
+        res.json({ message: "تم حفظ إعدادات شركات الشحن بنجاح" });
+    } catch (e) {
+        res.status(500).json({ message: "فشل حفظ إعدادات الشحن" });
+    }
+});
+
+// 3. 🚀 إرسال الأوردر لشركة الشحن وتوليد البوليصة بضغطة زر
+app.post('/api/orders/:id/send-to-shipping', async (req, res) => {
+    try {
+        const orderId = req.params.id;
+        const order = await Order.findById(orderId);
+        if (!order) return res.status(404).json({ message: "الطلب غير موجود" });
+
+        const shippingSettingsDoc = await Settings.findOne({ type: 'shipping' }).lean();
+        const shippingSettings = shippingSettingsDoc ? shippingSettingsDoc.data : {};
+        const provider = req.body.provider || shippingSettings.defaultProvider || 'bosta';
+
+        let trackingNumber = '';
+
+        if (provider === 'bosta') {
+            const apiKey = shippingSettings.bostaApiKey;
+            if (!apiKey) return res.status(400).json({ message: "يرجى إدخال Bosta API Key في إعدادات الشحن أولاً" });
+
+            // استدعاء API شركة بوسطة لإنشاء الشحنة
+            const bostaRes = await fetch('https://api.bosta.co/api/v0/deliveries', {
+                method: 'POST',
+                headers: {
+                    'Authorization': apiKey,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    type: 10,
+                    specs: { packageType: "Parcel" },
+                    cod: order.grandTotal || order.total,
+                    receiver: {
+                        firstName: order.firstName || order.userName || "عميل",
+                        lastName: order.lastName || "",
+                        phone: order.phone,
+                        email: order.email || "customer@example.com"
+                    },
+                    dropOffAddress: {
+                        city: order.governorate,
+                        firstLine: order.address
+                    },
+                    notes: `طلب رقم: ${order._id}`
+                })
+            });
+
+            const bostaData = await bostaRes.json();
+            trackingNumber = bostaData.trackingNumber || (bostaData.data && bostaData.data.trackingNumber) || ('BOSTA-' + Date.now());
+        } else {
+            // شركة J&T Express
+            trackingNumber = 'JT-' + Date.now();
+        }
+
+        // تحديث حالة الأوردر تلقائياً
+        order.status = 'جاري الشحن';
+        order.trackingNumber = trackingNumber;
+        order.shippingProvider = provider;
+        await order.save();
+
+        res.json({
+            message: `تم إرسال الطلب بنجاح إلى شركة ${provider === 'bosta' ? 'بوسطة' : 'J&T'} 🚚`,
+            trackingNumber,
+            order
+        });
+    } catch (error) {
+        console.error("خطأ تحويل الشحن:", error);
+        res.status(500).json({ message: "حدث خطأ أثناء الاتصال بشركة الشحن", error: error.message });
     }
 });
 
